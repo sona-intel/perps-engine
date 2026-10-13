@@ -124,6 +124,7 @@ type fakeSource struct {
 	rt       Runtime
 	ready    bool
 	boards   map[sources.Period]sources.Leaderboard
+	pnlBoard map[sources.Period]sources.Leaderboard
 	accounts map[perpl.Address]perpl.Account
 	addrs    map[uint64]perpl.Address
 	liqs     []store.Liquidation
@@ -131,6 +132,9 @@ type fakeSource struct {
 	funding  []store.FundingPoint
 	keepers  []store.KeeperCount
 	totals   store.LiquidationTotals
+	oi       []store.OIPoint
+	candles  []sources.Candle
+	events   []sources.FundingEvent
 
 	err        error
 	errFor     map[string]error
@@ -145,6 +149,11 @@ type fakeSource struct {
 	keeperLimit  int
 	idsAsked     []uint64
 	storeCalls   int
+	oiMarket     uint64
+	oiSince      time.Time
+	oiStep       time.Duration
+	histMarket   uint64
+	histHours    int
 }
 
 func newFake(t testing.TB) *fakeSource {
@@ -231,6 +240,47 @@ func (f *fakeSource) Leaderboard(p sources.Period) (sources.Leaderboard, bool) {
 	defer f.mu.Unlock()
 	b, ok := f.boards[p]
 	return b, ok
+}
+
+func (f *fakeSource) Board(p sources.Period, by sources.By) (sources.Leaderboard, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if by == sources.ByPnl {
+		b, ok := f.pnlBoard[p]
+		return b, ok
+	}
+	b, ok := f.boards[p]
+	return b, ok
+}
+
+func (f *fakeSource) OpenInterestSeries(ctx context.Context, market uint64, since time.Time, step time.Duration) ([]store.OIPoint, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.oiMarket, f.oiSince, f.oiStep = market, since, step
+	if err := f.call(ctx, "OpenInterestSeries"); err != nil {
+		return nil, err
+	}
+	return f.oi, nil
+}
+
+func (f *fakeSource) Candles(ctx context.Context, market uint64, hours int) ([]sources.Candle, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.histMarket, f.histHours = market, hours
+	if err := f.call(ctx, "Candles"); err != nil {
+		return nil, err
+	}
+	return f.candles, nil
+}
+
+func (f *fakeSource) FundingEvents(ctx context.Context, market uint64, hours int) ([]sources.FundingEvent, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.histMarket, f.histHours = market, hours
+	if err := f.call(ctx, "FundingEvents"); err != nil {
+		return nil, err
+	}
+	return f.events, nil
 }
 
 func (f *fakeSource) Account(ctx context.Context, addr perpl.Address) (perpl.Account, error) {

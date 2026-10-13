@@ -41,7 +41,7 @@ type specCase struct {
 
 var stamped = []string{
 	"listMarkets", "getMarket", "getLiquidationMap", "getStress", "getStressAll", "getConcentration", "listLiquidations",
-	"listLiquidationsDaily", "getFunding", "getAccount",
+	"listLiquidationsDaily", "getFunding", "getAccount", "getMarketHistory", "getLeaderboard",
 }
 
 func loadSpec(t testing.TB) *openapi3.T {
@@ -119,6 +119,13 @@ func servedCases(t *testing.T) []specCase {
 		{name: "funding", path: base + "/funding?market=BTC"},
 		{name: "funding for a week", path: base + "/funding?market=eth&hours=168"},
 		{name: "funding for an hour", path: base + "/funding?market=1&hours=1"},
+		{name: "history of volume", path: base + "/markets/BTC/history?metric=volume&hours=24"},
+		{name: "history of funding", path: base + "/markets/eth/history?metric=funding&hours=720"},
+		{name: "history of open interest", path: base + "/markets/1/history?metric=oi"},
+		{name: "history of an empty market", path: base + "/markets/TAO/history?metric=oi&hours=168"},
+		{name: "leaderboard", path: base + "/leaderboard"},
+		{name: "leaderboard by volume of a day", path: base + "/leaderboard?by=volume&period=day&limit=100"},
+		{name: "leaderboard by pnl of a day", path: base + "/leaderboard?by=pnl&period=day&limit=1"},
 		{name: "account", path: base + "/accounts/" + addr},
 		{name: "account in uppercase", path: base + "/accounts/0x" + strings.ToUpper(addr[2:])},
 		{name: "account without positions", path: base + "/accounts/" + emptyAddr.String()},
@@ -139,6 +146,17 @@ func servedCases(t *testing.T) []specCase {
 		{name: "funding without a market", path: base + "/funding", status: http.StatusBadRequest, malformed: true},
 		{name: "market with a bad character", path: base + "/markets/BT%21", status: http.StatusBadRequest, malformed: true},
 		{name: "address that is too short", path: base + "/accounts/0x12", status: http.StatusBadRequest, malformed: true},
+		{name: "history hours 48", path: base + "/markets/BTC/history?metric=oi&hours=48", status: http.StatusBadRequest, malformed: true},
+		{name: "history without a metric", path: base + "/markets/BTC/history", status: http.StatusBadRequest, malformed: true},
+		{name: "history of an unknown metric", path: base + "/markets/BTC/history?metric=price", status: http.StatusBadRequest, malformed: true},
+		{name: "history of an unknown market", path: base + "/markets/DOGE/history?metric=oi", status: http.StatusNotFound},
+		{name: "history with the market data down", path: base + "/markets/BTC/history?metric=volume", status: http.StatusServiceUnavailable, handler: dbDown},
+		{name: "leaderboard of an unknown ranking", path: base + "/leaderboard?by=size", status: http.StatusBadRequest, malformed: true},
+		{name: "leaderboard of an unknown period", path: base + "/leaderboard?period=week", status: http.StatusBadRequest, malformed: true},
+		{name: "leaderboard limit 101", path: base + "/leaderboard?limit=101", status: http.StatusBadRequest, malformed: true},
+		{name: "leaderboard not read yet", path: base + "/leaderboard", status: http.StatusServiceUnavailable, handler: withSource(func(f *fakeSource) {
+			clear(f.pnlBoard)
+		})},
 		{name: "unknown parameter", path: base + "/markets?foo=1", status: http.StatusBadRequest},
 		{name: "repeated parameter", path: base + "/liquidations?limit=1&limit=2", status: http.StatusBadRequest},
 
@@ -357,6 +375,8 @@ func TestEveryOperationDeclaresItsProblems(t *testing.T) {
 		"listLiquidationsDaily": data,
 		"getFunding":            data,
 		"getAccount":            data,
+		"getMarketHistory":      data,
+		"getLeaderboard":        data,
 	}
 	got := make(map[string]*openapi3.Operation)
 	for _, item := range loadSpec(t).Paths.Map() {
@@ -442,12 +462,12 @@ func TestSpecDocumentsEveryProblemCodeAndCoverageCode(t *testing.T) {
 	if !slices.Equal(covs, codes(allCoverage...)) {
 		t.Errorf("coverage codes documented %v, served %v", covs, codes(allCoverage...))
 	}
-	for _, c := range []coverage{covSnapshotOnly, covBadDebtFloor, covLeaderboard, covHistory, covFunding, covStale} {
+	for _, c := range []coverage{covSnapshotOnly, covBadDebtFloor, covLeaderboard, covHistory, covFunding, covOI, covBoardFigures, covStale} {
 		if !slices.Contains(covs, c.Code) {
 			t.Errorf("coverage code %s is not documented", c.Code)
 		}
 	}
-	if len(covs) != 6 {
+	if len(covs) != 8 {
 		t.Errorf("%d coverage codes documented: %v", len(covs), covs)
 	}
 	backfill := doc.Components.Schemas["Status"].Value.Properties["backfill"].Value

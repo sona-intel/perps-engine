@@ -47,12 +47,19 @@ type Source interface {
 	Ready() bool
 	// Leaderboard reports false when none was fetched yet or the last fetch failed
 	Leaderboard(period sources.Period) (sources.Leaderboard, bool)
+	// Board is a leaderboard ranked by volume or by PnL, with the same reading as Leaderboard
+	Board(period sources.Period, by sources.By) (sources.Leaderboard, bool)
 	// Account returns ErrAccountNotFound, wrapped or not, when the exchange has no account for the address
 	Account(ctx context.Context, addr perpl.Address) (perpl.Account, error)
 	AccountAddresses(ctx context.Context, ids []uint64) (map[uint64]perpl.Address, error)
 	Liquidations(ctx context.Context, f store.LiquidationFilter) (store.LiquidationPage, error)
 	LiquidationsDaily(ctx context.Context, perpID *uint64, since time.Time) ([]store.DailyLiquidations, error)
 	FundingSeries(ctx context.Context, perpID uint64, since time.Time, step time.Duration) ([]store.FundingPoint, error)
+	OpenInterestSeries(ctx context.Context, market uint64, since time.Time, step time.Duration) ([]store.OIPoint, error)
+	// Candles are the hourly candles of the last hours hours, the newest still open
+	Candles(ctx context.Context, market uint64, hours int) ([]sources.Candle, error)
+	// FundingEvents are the funding events applied in the last hours hours, oldest first
+	FundingEvents(ctx context.Context, market uint64, hours int) ([]sources.FundingEvent, error)
 	KeeperCounts(ctx context.Context, limit int) ([]store.KeeperCount, error)
 	CountLiquidations(ctx context.Context) (store.LiquidationTotals, error)
 }

@@ -21,8 +21,9 @@ The engine only reads. It holds no wallet or private key, signs nothing, places 
 |---|---|
 | JSON-RPC (`PERPS_RPC_URL`, in the Sona stack the RPC router) | all contract reads at one block, the implementation slot, block times, the live tail of liquidation events, transaction senders |
 | HyperSync (`ENVIO_HYPERSYNC_KEY`, optional) | the backfill of `PositionLiquidated` events up to the tail cursor of the first start (done once, a restart resumes it only if it was cut short) from the deployment block. Without the key the history starts 9,000 blocks back and the API says so |
-| Perpl public REST (`/api/v1/trading/leaderboard/{day,all}/vol`) | volume shares and a wallet's rank. Optional, the API reports when it is unavailable |
-| Postgres | market snapshots (kept 8 days), position snapshots (kept 7 days), liquidations, account addresses, backfill and tail cursors |
+| Perpl public REST (`/api/v1/trading/leaderboard/{day,all}/{vol,pnl}`) | volume shares, a wallet's rank and the leaderboard route. Four requests every 10 minutes, one second apart. Optional, the API reports when it is unavailable |
+| Perpl public market data (`/api/v1/market-data/{perpId}/candles/3600/...` and `.../funding/...`) | the volume and funding history. One request a second at most, answers kept 5 minutes, only when a caller asks |
+| Postgres | market snapshots (kept 8 days), open interest points every 5 minutes (kept 31 days), position snapshots (kept 7 days), liquidations, account addresses, backfill and tail cursors |
 
 ## API
 
@@ -39,6 +40,8 @@ Internal only. `sona-api` is the public face. The full contract is [`openapi.yam
 | `GET .../liquidations?market=&limit=&cursor=` | liquidation events, newest first, cursor paged |
 | `GET .../liquidations/daily?market=&days=` | count and notional per UTC day |
 | `GET .../funding?market=&hours=` | mark, oracle gap and funding from stored snapshots |
+| `GET .../markets/{market}/history?metric=&hours=` | open interest (own snapshots), hourly volume and applied funding rates (Perpl market data) over 24, 168 or 720 hours |
+| `GET .../leaderboard?by=&period=&limit=` | Perpl's leaderboard ranked by PnL or volume, for all time or the last day |
 | `GET .../accounts/{address}` | wallet risk card, 404 `not_found` for an address with no account |
 | `GET /healthz`, `GET /readyz` | liveness, and readiness after migrations and the first snapshot. Readiness turns 503 again when the snapshot is older than four refresh intervals (2 minutes), and the records built from it then carry `perpl_snapshot_stale` |
 

@@ -26,9 +26,11 @@ type Deps struct {
 	Chain  refresh.Chain
 	Store  Store
 	// Hyper and Board may be nil, which turns the backfill and the leaderboard poll off
-	Hyper  refresh.Scanner
-	Board  refresh.Board
-	Logger *slog.Logger
+	Hyper refresh.Scanner
+	Board refresh.Board
+	// MarketData may be nil, which turns the candle and funding history off
+	MarketData MarketData
+	Logger     *slog.Logger
 }
 
 // staleAfter is how old a snapshot may get before the API calls it stale, a few missed refreshes
@@ -36,6 +38,9 @@ func staleAfter(c config.Config) time.Duration { return 4 * c.RefreshInterval }
 
 // leaderboardMaxAge is how old a leaderboard copy may get, a few missed polls
 func leaderboardMaxAge(c config.Config) time.Duration { return 3 * c.LeaderboardInterval }
+
+// boardGap is the pause between the four leaderboard requests of one poll
+const boardGap = time.Second
 
 // App holds the runner to start and the two handlers to serve
 type App struct {
@@ -52,13 +57,13 @@ func New(d Deps) (*App, error) {
 	// the runner owns its own registry because the server metrics need the runner first
 	reg := prometheus.NewRegistry()
 	runner, err := refresh.New(refresh.Options{
-		Config: d.Config, Chain: d.Chain, Store: d.Store, HyperSync: d.Hyper, Board: d.Board,
+		Config: d.Config, Chain: d.Chain, Store: d.Store, HyperSync: d.Hyper, Board: d.Board, BoardGap: boardGap,
 		Registerer: reg, Logger: d.Logger,
 	})
 	if err != nil {
 		return nil, err
 	}
-	src := NewSource(runner, d.Store, exchange, WithLeaderboardMaxAge(leaderboardMaxAge(d.Config), time.Now))
+	src := NewSource(runner, d.Store, exchange, WithLeaderboardMaxAge(leaderboardMaxAge(d.Config), time.Now), WithMarketData(d.MarketData))
 	m := server.NewMetrics(src)
 	return &App{
 		Runner:  runner,

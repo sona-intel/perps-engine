@@ -13,6 +13,7 @@ import (
 const (
 	priceDigits = 15
 	per100K     = 100_000
+	perMillion  = 1_000_000
 	bpsPerOne   = 10_000
 )
 

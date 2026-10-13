@@ -154,6 +154,7 @@ func fixtureSource(t testing.TB) *fakeSource {
 	f.accounts[emptyAddr] = perpl.Account{
 		AccountID: 555, BalanceCNS: cns(12), LockedBalanceCNS: new(big.Int), Frozen: 1, Address: emptyAddr,
 	}
+	recordedHistory(t, f)
 	f.liqs = nil
 	for i, perp := range []uint64{1, 10, 1, 20, 30} {
 		f.liqs = append(f.liqs, testkit.Liquidation(112_000_000-uint64(i)*10, uint64(i%2), perp))

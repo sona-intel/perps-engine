@@ -30,9 +30,18 @@ type Reader interface {
 	Liquidations(ctx context.Context, f store.LiquidationFilter) (store.LiquidationPage, error)
 	LiquidationsDaily(ctx context.Context, perpID *uint64, since time.Time) ([]store.DailyLiquidations, error)
 	FundingSeries(ctx context.Context, perpID uint64, since time.Time, step time.Duration) ([]store.FundingPoint, error)
+	OpenInterestSeries(ctx context.Context, market uint64, since time.Time, step time.Duration) ([]store.OIPoint, error)
 	KeeperCounts(ctx context.Context, limit int) ([]store.KeeperCount, error)
 	CountLiquidations(ctx context.Context) (store.LiquidationTotals, error)
 }
+
+// MarketData is the public Perpl candle and funding history
+type MarketData interface {
+	Candles(ctx context.Context, market uint64, hours int) ([]sources.Candle, error)
+	Funding(ctx context.Context, market uint64, hours int) ([]sources.FundingEvent, error)
+}
+
+var errNoMarketData = errors.New("no market data client is configured")
 
 type converted struct {
 	from *refresh.Snapshot
@@ -46,6 +55,7 @@ type Source struct {
 	exchange perpl.Address
 	cache    atomic.Pointer[converted]
 
+	marketData  MarketData
 	boardMaxAge time.Duration
 	now         func() time.Time
 }
@@ -56,6 +66,11 @@ type SourceOption func(*Source)
 // WithLeaderboardMaxAge drops a leaderboard copy that is older than limit, so the volume fields fall back to the unavailable code
 func WithLeaderboardMaxAge(limit time.Duration, now func() time.Time) SourceOption {
 	return func(s *Source) { s.boardMaxAge, s.now = limit, now }
+}
+
+// WithMarketData turns the candle and funding history on
+func WithMarketData(md MarketData) SourceOption {
+	return func(s *Source) { s.marketData = md }
 }
 
 func NewSource(r Runner, rd Reader, exchange perpl.Address, opts ...SourceOption) *Source {
@@ -99,22 +114,44 @@ func (s *Source) Runtime() server.Runtime {
 }
 
 func (s *Source) Leaderboard(period sources.Period) (sources.Leaderboard, bool) {
+	return s.Board(period, sources.ByVolume)
+}
+
+func (s *Source) Board(period sources.Period, by sources.By) (sources.Leaderboard, bool) {
 	data, ok := s.runner.Leaderboard()
 	if !ok {
 		return sources.Leaderboard{}, false
 	}
 	var lb *sources.Leaderboard
 	var at time.Time
-	switch period {
-	case sources.PeriodDay:
+	switch {
+	case period == sources.PeriodDay && by == sources.ByVolume:
 		lb, at = data.Day, data.DayAt
-	case sources.PeriodAll:
+	case period == sources.PeriodAll && by == sources.ByVolume:
 		lb, at = data.All, data.AllAt
+	case period == sources.PeriodDay && by == sources.ByPnl:
+		lb, at = data.DayPnl, data.DayPnlAt
+	case period == sources.PeriodAll && by == sources.ByPnl:
+		lb, at = data.AllPnl, data.AllPnlAt
 	}
 	if lb == nil || (s.boardMaxAge > 0 && s.now().Sub(at) > s.boardMaxAge) {
 		return sources.Leaderboard{}, false
 	}
 	return *lb, true
+}
+
+func (s *Source) Candles(ctx context.Context, market uint64, hours int) ([]sources.Candle, error) {
+	if s.marketData == nil {
+		return nil, errNoMarketData
+	}
+	return s.marketData.Candles(ctx, market, hours)
+}
+
+func (s *Source) FundingEvents(ctx context.Context, market uint64, hours int) ([]sources.FundingEvent, error) {
+	if s.marketData == nil {
+		return nil, errNoMarketData
+	}
+	return s.marketData.Funding(ctx, market, hours)
 }
 
 func (s *Source) Account(ctx context.Context, addr perpl.Address) (perpl.Account, error) {

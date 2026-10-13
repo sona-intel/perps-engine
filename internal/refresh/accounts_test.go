@@ -249,8 +249,10 @@ func TestLeaderboardKeepsTheLastGoodCopy(t *testing.T) {
 
 func TestLeaderboardUnavailableWhenNeverFetched(t *testing.T) {
 	g := newRig(t)
-	g.board.setFail(sources.PeriodDay, errBoom)
-	g.board.setFail(sources.PeriodAll, errBoom)
+	for _, p := range []sources.Period{sources.PeriodDay, sources.PeriodAll} {
+		g.board.setFail(p, errBoom)
+		g.board.setFailBy(p, sources.ByPnl, errBoom)
+	}
 	g.r.pollLeaderboard(context.Background())
 	if _, ok := g.r.Leaderboard(); ok {
 		t.Fatal("leaderboard available after only failures")

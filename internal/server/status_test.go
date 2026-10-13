@@ -30,7 +30,7 @@ func TestStatus(t *testing.T) {
 	if r.at(t, "kind") != "perpl_status" || r.at(t, "chain") != "eip155:143" {
 		t.Fatal(r.body)
 	}
-	want := []string{"perpl_snapshot_only", "perpl_bad_debt_is_floor", "perpl_leaderboard_unavailable", "perpl_history_partial", "perpl_funding_from_snapshots", "perpl_snapshot_stale"}
+	want := []string{"perpl_snapshot_only", "perpl_bad_debt_is_floor", "perpl_leaderboard_unavailable", "perpl_history_partial", "perpl_funding_from_snapshots", "perpl_oi_from_snapshots", "perpl_leaderboard_figures", "perpl_snapshot_stale"}
 	for i, code := range want {
 		if r.at(t, "coverage", i, "code") != code || r.at(t, "coverage", i, "note") == "" {
 			t.Fatalf("coverage %d: %v", i, r.at(t, "coverage", i))

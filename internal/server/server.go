@@ -26,7 +26,10 @@ const (
 	prefix             = "/internal/v1/chains/{chain}/perpl"
 )
 
-var errNotReady = errors.New("the first snapshot is not ready")
+var (
+	errNotReady      = errors.New("the first snapshot is not ready")
+	errBoardNotReady = errors.New("the leaderboard is not ready")
+)
 
 type Options struct {
 	// Now is the clock, time.Now when nil
@@ -56,6 +59,8 @@ var routes = []struct {
 	{"GET " + prefix + "/liquidations/daily", (*app).liquidationsDaily},
 	{"GET " + prefix + "/funding", (*app).funding},
 	{"GET " + prefix + "/accounts/{address}", (*app).account},
+	{"GET " + prefix + "/markets/{market}/history", (*app).marketHistory},
+	{"GET " + prefix + "/leaderboard", (*app).leaderboard},
 }
 
 func New(src Source, m *Metrics, opts Options) http.Handler {
@@ -231,6 +236,8 @@ func (a *app) fail(w http.ResponseWriter, req *http.Request, err error) {
 		p = problem.New(he.code, he.detail, instance)
 	case errors.Is(err, errNotReady):
 		p = problem.NotReady("The first snapshot of the exchange is not ready yet.", instance)
+	case errors.Is(err, errBoardNotReady):
+		p = problem.NotReady("The public leaderboard has not been read yet or its last copy is too old.", instance)
 	case errors.Is(err, ErrAccountNotFound):
 		p = problem.New(problem.CodeNotFound, "This address has no Perpl account.", instance)
 	case errors.As(err, &pe):
@@ -293,6 +300,8 @@ var (
 	covLeaderboard  = coverage{"perpl_leaderboard_unavailable", "The public leaderboard could not be read, so the volume shares or the rank that depend on it are left out."}
 	covHistory      = coverage{"perpl_history_partial", "The liquidation history may be incomplete because the backfill of older events is disabled or still running. See backfill in the status."}
 	covStale        = coverage{"perpl_snapshot_stale", "The latest snapshot is older than the engine allows, so refreshes are failing and these numbers describe an earlier block. See the status for the block and its age."}
+	covOI           = coverage{"perpl_oi_from_snapshots", "The series is built from the snapshots this engine stored every five minutes, so it starts when the engine began recording and a gap means the engine was not running."}
+	covBoardFigures = coverage{"perpl_leaderboard_figures", "The leaderboard is Perpl's own. Its volume counts both sides of every trade, so it is about twice the traded volume, and Perpl does not publish what its PnL figure includes."}
 	covFunding      = coverage{"perpl_funding_from_snapshots", "The series is built from the snapshots this engine stored, so it starts when the engine started and a gap means the engine was not running."}
 )
 
@@ -316,7 +325,7 @@ func (a *app) stale(s *Snapshot) bool {
 }
 
 // allCoverage is every limit the service can state, in the order the status lists them
-var allCoverage = []coverage{covSnapshotOnly, covBadDebtFloor, covLeaderboard, covHistory, covFunding, covStale}
+var allCoverage = []coverage{covSnapshotOnly, covBadDebtFloor, covLeaderboard, covHistory, covFunding, covOI, covBoardFigures, covStale}
 
 // codes is the coverage field of a record, an empty array when no limit applies
 func codes(cs ...coverage) []string {

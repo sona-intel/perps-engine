@@ -14,6 +14,7 @@ type storeReads interface {
 	Liquidations(ctx context.Context, f store.LiquidationFilter) (store.LiquidationPage, error)
 	LiquidationsDaily(ctx context.Context, perpID *uint64, since time.Time) ([]store.DailyLiquidations, error)
 	FundingSeries(ctx context.Context, perpID uint64, since time.Time, step time.Duration) ([]store.FundingPoint, error)
+	OpenInterestSeries(ctx context.Context, market uint64, since time.Time, step time.Duration) ([]store.OIPoint, error)
 	KeeperCounts(ctx context.Context, limit int) ([]store.KeeperCount, error)
 	CountLiquidations(ctx context.Context) (store.LiquidationTotals, error)
 }

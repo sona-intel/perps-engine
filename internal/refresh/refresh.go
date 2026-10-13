@@ -26,6 +26,10 @@ const (
 	pruneEvery     = time.Hour
 	// a day more than the 168 hours the funding route can ask for
 	marketRetention = 8 * 24 * time.Hour
+	// the history route asks for at most 720 hours, one day more is kept
+	oiRetention = 31 * 24 * time.Hour
+	// the 30 s snapshots are thinned to one open interest point per bucket
+	oiBucket        = 5 * time.Minute
 	dbTimeout       = 10 * time.Second
 	accountCacheTTL = 5 * time.Minute
 	accountCacheMax = 10000
@@ -56,6 +60,8 @@ type Store interface {
 	InsertPositionSnapshots(ctx context.Context, rows []store.PositionSnapshot) error
 	PrunePositionSnapshots(ctx context.Context, before time.Time) (int64, error)
 	PruneMarketSnapshots(ctx context.Context, before time.Time) (int64, error)
+	InsertMarketOI(ctx context.Context, rows []store.OIPoint) error
+	PruneMarketOI(ctx context.Context, before time.Time) (int64, error)
 	UpsertLiquidations(ctx context.Context, rows []store.Liquidation) error
 	CountLiquidations(ctx context.Context) (store.LiquidationTotals, error)
 	UpsertAccounts(ctx context.Context, rows []store.Account) error
@@ -72,7 +78,7 @@ type Scanner interface {
 
 // Board is the public leaderboard client
 type Board interface {
-	Leaderboard(ctx context.Context, period sources.Period) (sources.Leaderboard, error)
+	Board(ctx context.Context, period sources.Period, by sources.By) (sources.Leaderboard, error)
 }
 
 var (
@@ -89,7 +95,9 @@ type Options struct {
 	// HyperSync is used for the backfill only when the config also holds a key
 	HyperSync Scanner
 	// Board is optional and a nil value turns the leaderboard poll off
-	Board      Board
+	Board Board
+	// BoardGap is the pause between two leaderboard requests
+	BoardGap   time.Duration
 	Registerer prometheus.Registerer
 	Logger     *slog.Logger
 	Now        func() time.Time
@@ -103,6 +111,7 @@ type Runner struct {
 	store        Store
 	hyper        Scanner
 	board        Board
+	boardGap     time.Duration
 	log          *slog.Logger
 	now          func() time.Time
 	sem          chan struct{}
@@ -119,6 +128,7 @@ type Runner struct {
 	slow         *slowData
 	baselineImpl *perpl.Address
 	lastPrune    time.Time
+	lastOI       time.Time
 	lastPaid     int64
 
 	refreshes     atomic.Uint64
@@ -154,6 +164,7 @@ func New(o Options) (*Runner, error) {
 		store:          o.Store,
 		hyper:          o.HyperSync,
 		board:          o.Board,
+		boardGap:       o.BoardGap,
 		log:            o.Logger,
 		now:            o.Now,
 		sem:            make(chan struct{}, o.Config.MaxInflightCalls),

@@ -15,12 +15,30 @@ func (r *Runner) persist(ctx context.Context, snap *Snapshot, index uint64) {
 	if err := r.store.InsertMarketSnapshots(ctx, marketRows(snap)); err != nil {
 		r.countError("persist", fmt.Errorf("market snapshots: %w", err))
 	}
+	r.persistOI(ctx, snap)
 	if index%uint64(r.cfg.PositionSnapshotEvery) != 0 {
 		return
 	}
 	if err := r.store.InsertPositionSnapshots(ctx, positionRows(snap)); err != nil {
 		r.countError("persist", fmt.Errorf("position snapshots: %w", err))
 	}
+}
+
+// persistOI stores one open interest point per market for each five minute bucket of block time, the first snapshot of the bucket
+func (r *Runner) persistOI(ctx context.Context, snap *Snapshot) {
+	bucket := snap.Time.UTC().Truncate(oiBucket)
+	if !bucket.After(r.lastOI) {
+		return
+	}
+	rows := oiRows(snap, bucket)
+	if len(rows) == 0 {
+		return
+	}
+	if err := r.store.InsertMarketOI(ctx, rows); err != nil {
+		r.countError("persist", fmt.Errorf("market oi: %w", err))
+		return
+	}
+	r.lastOI = bucket
 }
 
 // pruneIfDue drops old position and market snapshots at most once an hour
@@ -36,6 +54,9 @@ func (r *Runner) pruneIfDue(ctx context.Context) {
 		r.countError("prune", err)
 	}
 	if _, err := r.store.PruneMarketSnapshots(ctx, now.Add(-marketRetention)); err != nil {
+		r.countError("prune", err)
+	}
+	if _, err := r.store.PruneMarketOI(ctx, now.Add(-oiRetention)); err != nil {
 		r.countError("prune", err)
 	}
 }
@@ -66,6 +87,20 @@ func marketRows(snap *Snapshot) []store.MarketSnapshot {
 			SCRP10:             ratioText(mv.Metrics.SCRP10),
 		}
 		rows = append(rows, row)
+	}
+	return rows
+}
+
+// oiRows holds the long side notional at the mark, which equals the short side on Perpl
+func oiRows(snap *Snapshot, t time.Time) []store.OIPoint {
+	rows := make([]store.OIPoint, 0, len(snap.Markets))
+	for _, mv := range snap.Markets {
+		if !mv.Priced {
+			continue
+		}
+		rows = append(rows, store.OIPoint{
+			Market: mv.Market.PerpID, Time: t, OpenInterestUSD: risk.FormatUSD(mv.Metrics.LongNotional), Positions: len(mv.Book),
+		})
 	}
 	return rows
 }

@@ -22,6 +22,14 @@ const (
 	PeriodAll Period = "all"
 )
 
+// By names the ranking of a leaderboard
+type By string
+
+const (
+	ByVolume By = "vol"
+	ByPnl    By = "pnl"
+)
+
 const (
 	leaderboardSuffix = "/trading/leaderboard"
 	tickerSuffix      = "/market-data/ticker"
@@ -33,7 +41,7 @@ type Stamp struct {
 	Time  time.Time
 }
 
-// The API leaves p undocumented and it is read as PnL
+// The API leaves p undocumented, it is read as PnL in collateral units (6 decimals)
 type LeaderboardRow struct {
 	Rank      int
 	Address   perpl.Address
@@ -111,15 +119,24 @@ func validHTTPURL(raw string) bool {
 	return err == nil && u.Host != "" && u.User == nil && (u.Scheme == "http" || u.Scheme == "https")
 }
 
+// Leaderboard is the volume board of a period
 func (c *REST) Leaderboard(ctx context.Context, period Period) (Leaderboard, error) {
+	return c.Board(ctx, period, ByVolume)
+}
+
+// Board fetches one of the four boards, which list the same accounts in a different order
+func (c *REST) Board(ctx context.Context, period Period, by By) (Leaderboard, error) {
 	if period != PeriodDay && period != PeriodAll {
 		return Leaderboard{}, fmt.Errorf("leaderboard period must be %q or %q", PeriodDay, PeriodAll)
+	}
+	if by != ByVolume && by != ByPnl {
+		return Leaderboard{}, fmt.Errorf("leaderboard ranking must be %q or %q", ByVolume, ByPnl)
 	}
 	var raw struct {
 		At wireStamp  `json:"at"`
 		D  []wireRank `json:"d"`
 	}
-	if err := c.get(ctx, c.leaderboard+"/"+string(period)+"/vol", &raw); err != nil {
+	if err := c.get(ctx, c.leaderboard+"/"+string(period)+"/"+string(by), &raw); err != nil {
 		return Leaderboard{}, err
 	}
 	if raw.D == nil {
@@ -208,13 +225,17 @@ func (n *bigNum) big() *big.Int {
 }
 
 func (c *REST) get(ctx context.Context, target string, out any) error {
+	return getJSON(ctx, c.hc, target, out)
+}
+
+func getJSON(ctx context.Context, hc *http.Client, target string, out any) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
 	if err != nil {
 		return fmt.Errorf("perpl rest request: %w", err)
 	}
 	req.Header.Set("User-Agent", userAgent)
 	req.Header.Set("Accept", "application/json")
-	resp, err := c.hc.Do(req)
+	resp, err := hc.Do(req)
 	if err != nil {
 		return fmt.Errorf("perpl rest: %w", err)
 	}

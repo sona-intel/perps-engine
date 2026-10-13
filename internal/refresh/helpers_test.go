@@ -551,6 +551,8 @@ type fakeStore struct {
 	cursors   map[string]uint64
 	pruned    []time.Time
 	prunedMkt []time.Time
+	oi        []store.OIPoint
+	prunedOI  []time.Time
 	failures  map[string]error
 	writes    map[string]int
 	stall     atomic.Bool
@@ -623,6 +625,26 @@ func (s *fakeStore) PrunePositionSnapshots(ctx context.Context, before time.Time
 		return 0, err
 	}
 	s.pruned = append(s.pruned, before)
+	return 0, nil
+}
+
+func (s *fakeStore) InsertMarketOI(_ context.Context, rows []store.OIPoint) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.enter("oi"); err != nil {
+		return err
+	}
+	s.oi = append(s.oi, rows...)
+	return nil
+}
+
+func (s *fakeStore) PruneMarketOI(_ context.Context, before time.Time) (int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.enter("prune_oi"); err != nil {
+		return 0, err
+	}
+	s.prunedOI = append(s.prunedOI, before)
 	return 0, nil
 }
 
@@ -759,34 +781,50 @@ func (s *fakeStore) positionRows() []store.PositionSnapshot {
 /* Fake leaderboard */
 
 type fakeBoard struct {
-	mu    sync.Mutex
-	rows  map[sources.Period]sources.Leaderboard
-	fail  map[sources.Period]error
-	calls map[sources.Period]int
+	mu      sync.Mutex
+	rows    map[sources.Period]sources.Leaderboard
+	pnlRows map[sources.Period]sources.Leaderboard
+	fail    map[boardKey]error
+	calls   map[sources.Period]int
+	pnlCall map[sources.Period]int
+}
+
+type boardKey struct {
+	period sources.Period
+	by     sources.By
 }
 
 func newFakeBoard() *fakeBoard {
 	return &fakeBoard{
-		rows:  make(map[sources.Period]sources.Leaderboard),
-		fail:  make(map[sources.Period]error),
-		calls: make(map[sources.Period]int),
+		rows:    make(map[sources.Period]sources.Leaderboard),
+		pnlRows: make(map[sources.Period]sources.Leaderboard),
+		fail:    make(map[boardKey]error),
+		calls:   make(map[sources.Period]int),
+		pnlCall: make(map[sources.Period]int),
 	}
 }
 
-func (b *fakeBoard) Leaderboard(_ context.Context, p sources.Period) (sources.Leaderboard, error) {
+func (b *fakeBoard) Board(_ context.Context, p sources.Period, by sources.By) (sources.Leaderboard, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	b.calls[p]++
-	if err := b.fail[p]; err != nil {
+	if err := b.fail[boardKey{p, by}]; err != nil {
 		return sources.Leaderboard{}, err
 	}
+	if by == sources.ByPnl {
+		b.pnlCall[p]++
+		return b.pnlRows[p], nil
+	}
+	b.calls[p]++
 	return b.rows[p], nil
 }
 
-func (b *fakeBoard) setFail(p sources.Period, err error) {
+// setFail makes the volume board of a period fail
+func (b *fakeBoard) setFail(p sources.Period, err error) { b.setFailBy(p, sources.ByVolume, err) }
+
+func (b *fakeBoard) setFailBy(p sources.Period, by sources.By, err error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	b.fail[p] = err
+	b.fail[boardKey{p, by}] = err
 }
 
 /* HyperSync over httptest */

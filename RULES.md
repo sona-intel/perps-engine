@@ -54,6 +54,8 @@ The positions of a market form a linked list. The engine asks for a page startin
 Other sources, both public:
 
 - The Perpl REST API, `GET https://app.perpl.xyz/api/v1/trading/leaderboard/{day,all}/vol`, every 10 min, for volume and rank. Only the keys `i` (rank), `a` (address), `p` (PnL) and `v` (volume, 6 decimals) are used, and their meaning is inferred from the data, not documented by Perpl.
+- The Perpl REST API, `GET https://app.perpl.xyz/api/v1/trading/leaderboard/{day,all}/pnl`, the same rows ranked by PnL, every 10 min together with the volume boards, one request at a time with a one second pause.
+- The Perpl market data, `GET https://app.perpl.xyz/api/v1/market-data/{perpId}/candles/3600/{fromMs}-{toMs}` (keys `t` start in ms, `v` volume with 6 decimals, `n` trades) and `.../{perpId}/funding/{fromMs}-{toMs}` (keys `at.t` time in ms and `rate`), only when a history route asks, through one client that sends at most one request a second and keeps an answer 5 minutes.
 - HyperSync (`https://monad.hypersync.xyz/query`) with an API key, for the history backfill. See section 8.
 
 ## 2. Per position
@@ -194,6 +196,16 @@ At the recorded block, long open interest equals short open interest in every ma
 
 **Funding series.** `GET .../funding` is built from the market snapshots this engine stored, one row per refresh. It starts when the engine first ran, and a gap means the engine was not running. The engine keeps market snapshots for 8 days and deletes older rows once an hour, a day more than the 168 hours the route can ask for (position snapshots are kept 7 days). Coverage code `perpl_funding_from_snapshots`.
 
+## 7b. History and leaderboard routes
+
+**Volume history.** `GET .../markets/{market}/history?metric=volume` serves the hourly candles of Perpl's market data. `volume_usd = v / 10^6`. The sum of the 24 hourly candles of BTC equals the `dva` (24 hour volume in collateral) of Perpl's ticker for BTC within the rounding of the moment (20.44 million USD at the check). The newest candle is still open. Perpl leaves out an hour without trades, so the series can have gaps.
+
+**Funding history.** `metric=funding` serves the funding events Perpl applied, `rate = rate / 10^6` of notional per funding interval. Perpl's `rate` is in millionths, which the data shows: its `ppl` field (the payment per unit) equals `rate * idx / 10^6` for every event (rate 40 on index 829410 gives 33), and a stored contract reading of `fundingRatePct100k = -4` (a `funding_rate` of -0.00004) sits next to the Perpl events of -40 in the same hours. So the history and the `funding_rate` of the market list use the same unit, a fraction of notional. The unit of `rate` is inferred from the data, not documented by Perpl.
+
+**Open interest history.** `metric=oi` is built from this engine's own snapshots. Every five minutes of block time the first snapshot of the bucket stores, per priced market, the long notional at the mark (it equals the short notional, section 7) and the number of positions in the table `market_oi`, kept 31 days. The route thins the rows to one per step (5 minutes for 24 hours, 30 minutes for 168 hours, 2 hours for 720 hours), the last row of each window. It starts when the engine began recording and a gap means it was not running. Coverage code `perpl_oi_from_snapshots`.
+
+**Leaderboard.** `GET .../leaderboard` serves rows of Perpl's four boards (`day` and `all`, ranked by `pnl` or `vol`) unchanged: `rank` is Perpl's `i`, `pnl_usd = p / 10^6`, `volume_usd = v / 10^6`. `volume_share` is the row's volume over the volume of all rows of the same board (about 5,000 accounts), so it is a share of the leaderboard and not of the exchange. Perpl's volume counts both sides of a trade: at the check the volume board of the last day summed to 49.0 million USD against 26.3 million USD of 24 hour volume over all markets in the ticker, 1.9 times. Perpl does not say what its PnL figure includes, so the engine states no more than "Perpl's PnL". A board older than 30 minutes is not served and the route answers 503. Coverage code `perpl_leaderboard_figures`.
+
 ## 8. Liquidation history
 
 The event is `PositionLiquidated(perpId, posAccountId, positionType, markPricePNS, liqPricePNS, liqLotLNS, posLotLNS, deltaPnlCNS, fundingCNS, posAmountCNS, posDepositCNS, accAmountCNS, accBalanceCNS, onOrderBook)`. [`perpl.DecodeLiquidation`]
@@ -227,7 +239,7 @@ The event is `PositionLiquidated(perpId, posAccountId, positionType, markPricePN
 
 - **Not live.** Every position figure is a snapshot of one block, 30 seconds apart. A trader can add collateral or close a position the second after. When refreshes keep failing, the last snapshot stays served. Once it is older than four refresh intervals (2 minutes) the records built from it carry `perpl_snapshot_stale` and `/readyz` answers 503. The block in `Sona-Block` always says which block the numbers describe.
 - **Not a forecast.** The stress numbers are a mechanical "what if the price jumped", with the limits of section 4.
-- **Not an exchange report.** Volume shares come from a public leaderboard of Perpl's own, whose key meanings are inferred.
+- **Not an exchange report.** Volume shares come from a public leaderboard of Perpl's own, whose key meanings are inferred. The volume and funding histories are Perpl's public market data, and the open interest history starts when this engine began recording.
 - **Not complete history without the key.** See section 8.
 - **No private data.** The engine reads public chain state and public Perpl market data. It holds no key, signs nothing and calls no signed per-account Perpl API.
 

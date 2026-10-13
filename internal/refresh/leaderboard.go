@@ -7,12 +7,17 @@ import (
 	"perps/internal/sources"
 )
 
-// LeaderboardData holds the last good copy of each period and a nil period was never fetched
+// LeaderboardData holds the last good copy of each board and a nil board was never fetched. Day and All are the volume boards,
+// DayPnl and AllPnl list the same accounts ranked by PnL.
 type LeaderboardData struct {
-	Day   *sources.Leaderboard
-	All   *sources.Leaderboard
-	DayAt time.Time
-	AllAt time.Time
+	Day      *sources.Leaderboard
+	All      *sources.Leaderboard
+	DayAt    time.Time
+	AllAt    time.Time
+	DayPnl   *sources.Leaderboard
+	AllPnl   *sources.Leaderboard
+	DayPnlAt time.Time
+	AllPnlAt time.Time
 }
 
 // Leaderboard returns the last good copies and false until at least one period was fetched
@@ -47,8 +52,22 @@ func (r *Runner) pollLeaderboard(ctx context.Context) {
 		next = *prev
 	}
 	changed := false
-	for _, period := range []sources.Period{sources.PeriodDay, sources.PeriodAll} {
-		lb, err := r.board.Leaderboard(ctx, period)
+	first := true
+	for _, b := range []struct {
+		period sources.Period
+		by     sources.By
+	}{
+		{sources.PeriodDay, sources.ByVolume},
+		{sources.PeriodAll, sources.ByVolume},
+		{sources.PeriodDay, sources.ByPnl},
+		{sources.PeriodAll, sources.ByPnl},
+	} {
+		// the boards are large and the API is shared, so the requests go out one at a time with a pause
+		if !first && r.boardGap > 0 && !wait(ctx, r.boardGap) {
+			break
+		}
+		first = false
+		lb, err := r.board.Board(ctx, b.period, b.by)
 		if err != nil {
 			if ctx.Err() == nil {
 				r.countError("leaderboard", err)
@@ -57,10 +76,15 @@ func (r *Runner) pollLeaderboard(ctx context.Context) {
 		}
 		at := r.now()
 		changed = true
-		if period == sources.PeriodDay {
+		switch {
+		case b.period == sources.PeriodDay && b.by == sources.ByVolume:
 			next.Day, next.DayAt = &lb, at
-		} else {
+		case b.period == sources.PeriodAll && b.by == sources.ByVolume:
 			next.All, next.AllAt = &lb, at
+		case b.period == sources.PeriodDay:
+			next.DayPnl, next.DayPnlAt = &lb, at
+		default:
+			next.AllPnl, next.AllPnlAt = &lb, at
 		}
 	}
 	if changed {

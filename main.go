@@ -102,6 +102,11 @@ func serve(ctx context.Context) error {
 			return fmt.Errorf("leaderboard client: %w", err)
 		}
 		deps.Board = board
+		if root, ok := sources.MarketDataURL(cfg.LeaderboardURL); ok {
+			if deps.MarketData, err = sources.NewMarketData(root); err != nil {
+				return fmt.Errorf("market data client: %w", err)
+			}
+		}
 	}
 	if cfg.HyperSyncKey.Set() {
 		deps.Hyper = sources.NewHyperSync(cfg.HyperSyncURL, cfg.HyperSyncKey)
