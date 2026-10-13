@@ -1,0 +1,8 @@
+{
+  "perpInitMarginFracHdths": "1200",
+  "perpMaintMarginFracHdths": "2000",
+  "dynamicInitMarginFracHdths": "1200",
+  "oiMaxLNS": "100000000",
+  "unityDescentThreshHdths": "90",
+  "overColDescentThreshHdths": "95"
+}

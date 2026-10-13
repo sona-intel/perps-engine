@@ -1,0 +1,198 @@
+{
+  "entry_price": [
+    {
+      "name": "long_1_res0",
+      "position_type": "0",
+      "price_pns": "1",
+      "price_residue_pnsq16": "0",
+      "price_decimals": 4,
+      "sdk_asserted": "0.0001",
+      "exact": "0.0001"
+    },
+    {
+      "name": "long_1_res1",
+      "position_type": "0",
+      "price_pns": "1",
+      "price_residue_pnsq16": "1",
+      "price_decimals": 4,
+      "sdk_asserted": "0.00000000152587890625",
+      "exact": "0.00000000152587890625"
+    },
+    {
+      "name": "long_10001_res8",
+      "position_type": "0",
+      "price_pns": "10001",
+      "price_residue_pnsq16": "8",
+      "price_decimals": 4,
+      "sdk_asserted": "1.00000001220703125",
+      "exact": "1.00000001220703125"
+    },
+    {
+      "name": "long_10000_res65535",
+      "position_type": "0",
+      "price_pns": "10000",
+      "price_residue_pnsq16": "65535",
+      "price_decimals": 4,
+      "sdk_asserted": "0.9999999984741210937",
+      "exact": "0.99999999847412109375"
+    },
+    {
+      "name": "short_1_res0",
+      "position_type": "1",
+      "price_pns": "1",
+      "price_residue_pnsq16": "0",
+      "price_decimals": 4,
+      "sdk_asserted": "0.0001",
+      "exact": "0.0001"
+    },
+    {
+      "name": "short_0_res1",
+      "position_type": "1",
+      "price_pns": "0",
+      "price_residue_pnsq16": "1",
+      "price_decimals": 4,
+      "sdk_asserted": "0.00000000152587890625",
+      "exact": "0.00000000152587890625"
+    },
+    {
+      "name": "short_10000_res8",
+      "position_type": "1",
+      "price_pns": "10000",
+      "price_residue_pnsq16": "8",
+      "price_decimals": 4,
+      "sdk_asserted": "1.00000001220703125",
+      "exact": "1.00000001220703125"
+    },
+    {
+      "name": "short_9999_res65535",
+      "position_type": "1",
+      "price_pns": "9999",
+      "price_residue_pnsq16": "65535",
+      "price_decimals": 4,
+      "sdk_asserted": "0.9999999984741210937",
+      "exact": "0.99999999847412109375"
+    },
+    {
+      "name": "long_half_lsb_pd6",
+      "position_type": "0",
+      "price_pns": "100000000",
+      "price_residue_pnsq16": "32768",
+      "price_decimals": 6,
+      "sdk_asserted": "99.9999995",
+      "exact": "99.9999995"
+    },
+    {
+      "name": "short_half_lsb_pd6",
+      "position_type": "1",
+      "price_pns": "100000000",
+      "price_residue_pnsq16": "32768",
+      "price_decimals": 6,
+      "sdk_asserted": "100.0000005",
+      "exact": "100.0000005"
+    }
+  ],
+  "liquidation": [
+    {
+      "name": "long_base",
+      "position_type": "0",
+      "entry": "100",
+      "size": "10",
+      "deposit": "100",
+      "premium_pnl": "0",
+      "mmf": "20",
+      "mmr": "50",
+      "liq_price": "95",
+      "bankruptcy_price": "90"
+    },
+    {
+      "name": "short_base",
+      "position_type": "1",
+      "entry": "100",
+      "size": "10",
+      "deposit": "100",
+      "premium_pnl": "0",
+      "mmf": "20",
+      "mmr": "50",
+      "liq_price": "105",
+      "bankruptcy_price": "110"
+    },
+    {
+      "name": "long_funding_paid",
+      "position_type": "0",
+      "entry": "100",
+      "size": "10",
+      "deposit": "100",
+      "premium_pnl": "-50",
+      "mmf": "20",
+      "mmr": "50",
+      "liq_price": "100",
+      "bankruptcy_price": "95"
+    },
+    {
+      "name": "short_funding_paid",
+      "position_type": "1",
+      "entry": "100",
+      "size": "10",
+      "deposit": "100",
+      "premium_pnl": "-50",
+      "mmf": "20",
+      "mmr": "50",
+      "liq_price": "100",
+      "bankruptcy_price": "105"
+    },
+    {
+      "name": "long_funding_received",
+      "position_type": "0",
+      "entry": "100",
+      "size": "10",
+      "deposit": "100",
+      "premium_pnl": "50",
+      "mmf": "20",
+      "mmr": "50",
+      "liq_price": "90",
+      "bankruptcy_price": "85"
+    },
+    {
+      "name": "short_funding_received",
+      "position_type": "1",
+      "entry": "100",
+      "size": "10",
+      "deposit": "100",
+      "premium_pnl": "50",
+      "mmf": "20",
+      "mmr": "50",
+      "liq_price": "110",
+      "bankruptcy_price": "115"
+    }
+  ],
+  "mmr": [
+    {
+      "name": "mm20_e100_s10",
+      "entry": "100",
+      "size": "10",
+      "mmf": "20",
+      "mmr": "50"
+    },
+    {
+      "name": "mm20_e80_s10",
+      "entry": "80",
+      "size": "10",
+      "mmf": "20",
+      "mmr": "40"
+    },
+    {
+      "name": "mm20_e80_s20",
+      "entry": "80",
+      "size": "20",
+      "mmf": "20",
+      "mmr": "80"
+    },
+    {
+      "name": "mm10_e80_s20",
+      "entry": "80",
+      "size": "20",
+      "mmf": "10",
+      "mmr": "160"
+    }
+  ]
+}

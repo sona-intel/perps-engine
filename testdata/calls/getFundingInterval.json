@@ -1,0 +1,10 @@
+{
+  "function": "getFundingInterval",
+  "args": {},
+  "block": 112777356,
+  "request": {
+    "to": "0x34B6552d57a35a1D042CcAe1951BD1C370112a6F",
+    "data": "0x0d3e87a7"
+  },
+  "result": "0x000000000000000000000000000000000000000000000000000000000000217b"
+}

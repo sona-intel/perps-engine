@@ -1,0 +1,15 @@
+{
+  "accountInfo": {
+    "accountId": "4159",
+    "balanceCNS": "116482635718",
+    "lockedBalanceCNS": "77429928640",
+    "frozen": "0",
+    "accountAddr": "0x3562284915c74a8caa56a0edc656f8a538d6ce68",
+    "positions": {
+      "bank1": "1237940040439428781072974850",
+      "bank2": "0",
+      "bank3": "0",
+      "bank4": "0"
+    }
+  }
+}

@@ -1,0 +1,39 @@
+{
+  "chain": "eip155:143",
+  "exchange": "0x34B6552d57a35a1D042CcAe1951BD1C370112a6F",
+  "pinned_block": 112777356,
+  "pinned_block_hex": "0x6b8d88c",
+  "pinned_block_hash": "0x530feb841563dd90b739ac14f7c4ba54e2e65f4d4c2eafabb1375ce3c6cc4597",
+  "pinned_block_timestamp": 1791814917,
+  "head_when_pinned": 112777361,
+  "perp_ids": [
+    1,
+    10,
+    20,
+    30,
+    31,
+    40,
+    50,
+    60,
+    70,
+    80,
+    90,
+    100,
+    110,
+    120,
+    130,
+    140,
+    150
+  ],
+  "collateral_decimals": 6,
+  "implementation_slot": "0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc",
+  "implementation_address": "0xa9ab97a404a0bca04d6a5b4a39995fea9e791b2a",
+  "router_credit_sources": [
+    "unknown-monad.xyz:eth_blockNumber",
+    "unknown-monad.xyz:eth_call",
+    "unknown-monad.xyz:eth_getBlockByNumber",
+    "unknown-monad.xyz:eth_getStorageAt"
+  ],
+  "eth_calls": 120,
+  "router_paid_calls": 0
+}

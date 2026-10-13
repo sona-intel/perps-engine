@@ -1,0 +1,31 @@
+{
+  "contract": "0x34B6552d57a35a1D042CcAe1951BD1C370112a6F",
+  "functions": {
+    "getAccountByAddr": "0x12e8eb2c",
+    "getAccountById": "0x05aca141",
+    "getExchangeInfo": "0x8bc5b3c5",
+    "getFundingInterval": "0x0d3e87a7",
+    "getLiquidationInfo": "0x50ef5c35",
+    "getMarginFractions": "0x6825e9e5",
+    "getPerpetualExistsBitmap": "0x4349b379",
+    "getPerpetualInfoV2": "0x9b335b9e",
+    "getPositionIds": "0x1973c619",
+    "getPositionsV2": "0x92e19126"
+  },
+  "events": {
+    "PositionLiquidated": "0x6fc9c0ea1c0531654320ba06740c802447dbdef7c26cf749c4f12553cdd958a9"
+  },
+  "signatures": {
+    "PositionLiquidated": "PositionLiquidated(uint256,uint256,uint8,uint256,uint256,uint256,uint256,int256,int256,int256,uint256,int256,uint256,bool)",
+    "getAccountByAddr": "getAccountByAddr(address)",
+    "getAccountById": "getAccountById(uint256)",
+    "getExchangeInfo": "getExchangeInfo()",
+    "getFundingInterval": "getFundingInterval()",
+    "getLiquidationInfo": "getLiquidationInfo(uint256)",
+    "getMarginFractions": "getMarginFractions(uint256,uint256)",
+    "getPerpetualExistsBitmap": "getPerpetualExistsBitmap()",
+    "getPerpetualInfoV2": "getPerpetualInfoV2(uint256)",
+    "getPositionIds": "getPositionIds(uint256)",
+    "getPositionsV2": "getPositionsV2(uint256,uint256,uint256)"
+  }
+}

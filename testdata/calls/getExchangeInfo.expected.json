@@ -1,0 +1,8 @@
+{
+  "balanceCNS": "3331560576931",
+  "protocolBalanceCNS": "172856938978",
+  "recycleBalanceCNS": "0",
+  "collateralDecimals": "6",
+  "collateralToken": "0x00000000efe302beaa2b3e6e1b18d08d69a9012a",
+  "verifierProxy": "0xed813d895457907399e41d36ec0be103e32148c8"
+}

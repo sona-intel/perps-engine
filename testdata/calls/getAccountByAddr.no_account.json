@@ -1,0 +1,16 @@
+{
+  "function": "getAccountByAddr",
+  "args": {
+    "accountAddress": "0x000000000000000000000000000000000000dEaD"
+  },
+  "block": 112777356,
+  "request": {
+    "to": "0x34B6552d57a35a1D042CcAe1951BD1C370112a6F",
+    "data": "0x12e8eb2c000000000000000000000000000000000000000000000000000000000000dead"
+  },
+  "error": {
+    "data": "0x03a0e277000000000000000000000000000000000000000000000000000000000000dead",
+    "code": 3,
+    "message": "execution reverted"
+  }
+}

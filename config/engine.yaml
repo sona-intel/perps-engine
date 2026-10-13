@@ -1,0 +1,20 @@
+chain: eip155:143
+exchange: "0x34B6552d57a35a1D042CcAe1951BD1C370112a6F"
+expected_implementation: "0xa9ab97a404a0bca04d6a5b4a39995fea9e791b2a"
+rpc_url: http://rpc-router:4000/sona/monad
+# X-ERPC-Use-Upstream on every JSON-RPC request, empty sends no header
+rpc_upstream_filter: "!drpc-*"
+refresh_interval: 30s
+slow_refresh_interval: 10m
+position_page_size: 100
+max_inflight_calls: 2
+# batch the per-refresh reads through Multicall3, false sends one eth_call per read
+multicall: true
+shocks: [-0.2, -0.1, -0.05, -0.03, 0.03, 0.05, 0.1, 0.2]
+leaderboard_url: https://app.perpl.xyz/api/v1/trading/leaderboard
+leaderboard_interval: 10m
+hypersync_url: https://monad.hypersync.xyz/query
+deploy_block: 54773010
+# counted in refreshes, so 10 means every 5 minutes at the default interval
+position_snapshot_every: 10
+position_retention: 168h

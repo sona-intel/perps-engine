@@ -1,0 +1,13 @@
+{
+  "liquidationInfo": {
+    "liqInsAmtPer100K": "10000",
+    "liqUserAmtPer100K": "80000",
+    "liqProtocolAmtPer100K": "10000",
+    "btlPriceThreshPer100K": "95000",
+    "btlInsAmtPer100K": "25000",
+    "btlUserAmtPer100K": "25000",
+    "btlBuyerAmtPer100K": "25000",
+    "btlProtocolAmtPer100K": "25000",
+    "btlRestrictBuyers": true
+  }
+}

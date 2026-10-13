@@ -1,0 +1,9 @@
+{
+  "method": "eth_getStorageAt",
+  "block": 112777356,
+  "request": {
+    "address": "0x34B6552d57a35a1D042CcAe1951BD1C370112a6F",
+    "slot": "0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc"
+  },
+  "result": "0x000000000000000000000000a9ab97a404a0bca04d6a5b4a39995fea9e791b2a"
+}

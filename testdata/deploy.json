@@ -1,0 +1,11 @@
+{
+  "exchange_proxy": "0x34B6552d57a35a1D042CcAe1951BD1C370112a6F",
+  "deploy_block": 54773010,
+  "deploy_block_hash": "0x920c331560f77c8e4bdf1d011d0f7c9da4aad9bbd39b4ddb1190cb7bd27029ff",
+  "deploy_block_timestamp": 1770850947,
+  "found_by": "binary search on eth_getCode via the history router, 27 steps",
+  "creation_tx": "0x22d1d74e137c3a82ac4b702fd90024811b184fcdcf8fd4d1473097b4d8a619f3",
+  "creation_tx_block": 54773010,
+  "creation_tx_from": "0x141ace3283da8fd356b5f079b228146e783e50a6",
+  "receipt_contract_address": "0x34b6552d57a35a1d042ccae1951bd1c370112a6f"
+}
