@@ -1,10 +1,12 @@
 package server
 
 import (
+	"errors"
 	"net/http"
 	"testing"
 
 	"perps/internal/problem"
+	"perps/internal/testkit"
 )
 
 func TestMarketsListsLiveMarketsByPerpID(t *testing.T) {
@@ -295,6 +297,12 @@ func TestStressDefaultShockIsMinusTenPercent(t *testing.T) {
 	}
 	near(t, r.at(t, "top_positions", 0, "account_id"), 101)
 	near(t, r.at(t, "top_positions", 1, "account_id"), 103)
+	if got := r.at(t, "top_positions", 0, "account_address"); got != accountAddr.String() {
+		t.Errorf("top[0].account_address = %v", got)
+	}
+	if got := r.at(t, "top_positions", 1, "account_address"); got != testkit.Addr(103).String() {
+		t.Errorf("top[1].account_address = %v", got)
+	}
 	if r.at(t, "top_positions", 1, "bad_debt_usd") != "10" {
 		t.Fatal(r.at(t, "top_positions", 1))
 	}
@@ -372,4 +380,24 @@ func TestStressAllSummarisesEveryLiveMarket(t *testing.T) {
 	near(t, r.at(t, "items", 0, "shock"), -0.15)
 	def := fetch(t, testHandler(newFake(t)), base+"/stress")
 	near(t, def.at(t, "items", 0, "shock"), -0.1)
+}
+
+func TestStressTopPositionAddressIsNullWhenUnknown(t *testing.T) {
+	f := newFake(t)
+	delete(f.addrs, 103)
+	r := fetch(t, testHandler(f), base+"/markets/TST/stress?shock=-0.15")
+	isNull(t, r.at(t, "top_positions", 1, "account_address"))
+	if all := fetch(t, testHandler(f), base+"/stress?shock=-0.15"); all.Code != http.StatusOK {
+		t.Fatal(all.Code)
+	}
+}
+
+func TestStressFailsWhenAccountReadFails(t *testing.T) {
+	for _, path := range []string{"/markets/TST/stress", "/stress"} {
+		f := newFake(t)
+		f.errFor = map[string]error{"AccountAddresses": errors.New("dial tcp: connection refused")}
+		if r := fetch(t, testHandler(f), base+path); r.Code != http.StatusServiceUnavailable {
+			t.Fatal(path, r.Code, r.Body)
+		}
+	}
 }

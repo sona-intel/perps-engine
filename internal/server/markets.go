@@ -2,6 +2,7 @@ package server
 
 import (
 	"math/big"
+	"slices"
 
 	"perps/internal/perpl"
 	"perps/internal/problem"
@@ -307,13 +308,14 @@ type liquidatingBody struct {
 }
 
 type stressPositionBody struct {
-	AccountID       uint64 `json:"account_id"`
-	Side            string `json:"side"`
-	Size            string `json:"size"`
-	NotionalUSD     string `json:"notional_usd"`
-	LiqPrice        string `json:"liq_price"`
-	BankruptcyPrice string `json:"bankruptcy_price"`
-	BadDebtUSD      string `json:"bad_debt_usd"`
+	AccountID       uint64  `json:"account_id"`
+	AccountAddr     *string `json:"account_address"`
+	Side            string  `json:"side"`
+	Size            string  `json:"size"`
+	NotionalUSD     string  `json:"notional_usd"`
+	LiqPrice        string  `json:"liq_price"`
+	BankruptcyPrice string  `json:"bankruptcy_price"`
+	BadDebtUSD      string  `json:"bad_debt_usd"`
 }
 
 type stressItemBody struct {
@@ -369,6 +371,34 @@ func stressOf(s *Snapshot, b risk.MarketBook, shock float64) (stressItemBody, er
 	return out, nil
 }
 
+// resolveStressAddrs fills account_address on the top positions of every item with one lookup
+func (a *app) resolveStressAddrs(c *call, items ...*stressItemBody) error {
+	var ids []uint64
+	for _, it := range items {
+		for _, p := range it.TopPositions {
+			if !slices.Contains(ids, p.AccountID) {
+				ids = append(ids, p.AccountID)
+			}
+		}
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+	addrs, err := a.src.AccountAddresses(c.ctx, ids)
+	if err != nil {
+		return err
+	}
+	for _, it := range items {
+		for i := range it.TopPositions {
+			if addr, ok := addrs[it.TopPositions[i].AccountID]; ok {
+				v := addr.String()
+				it.TopPositions[i].AccountAddr = &v
+			}
+		}
+	}
+	return nil
+}
+
 func (a *app) stress() endpoint {
 	return func(c *call) (result, error) {
 		q, err := parseQuery(c.req, "shock")
@@ -389,6 +419,9 @@ func (a *app) stress() endpoint {
 		}
 		item, err := stressOf(s, b, shock)
 		if err != nil {
+			return result{}, err
+		}
+		if err := a.resolveStressAddrs(c, &item); err != nil {
 			return result{}, err
 		}
 		return result{body: stressBody{head: headOf("perpl_market_stress"), stressItemBody: item, Coverage: codes(a.withStale(s, covSnapshotOnly, covBadDebtFloor)...)}}, nil
@@ -417,6 +450,13 @@ func (a *app) stressAll() endpoint {
 				return result{}, err
 			}
 			out.Items = append(out.Items, st)
+		}
+		ptrs := make([]*stressItemBody, len(out.Items))
+		for i := range out.Items {
+			ptrs[i] = &out.Items[i]
+		}
+		if err := a.resolveStressAddrs(c, ptrs...); err != nil {
+			return result{}, err
 		}
 		return result{body: out}, nil
 	}

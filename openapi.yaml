@@ -333,7 +333,7 @@ paths:
         - `insurance_fund_usd` is the fund of the market.
         - `scr` is the Shock Cover Ratio, the fund divided by the gap bad debt: 2.5 means that the fund covers the loss 2.5 times. It is `null` and `no_bad_debt` is `true` when the shock causes no bad debt.
         - `uncovered_usd` is the bad debt that the fund cannot pay, which would fall on the rest of the system. It is 0 when `scr` is 1 or more.
-        - `top_positions` lists up to 10 liquidating positions, the largest notional at the mark first, with their size, notional at the mark, liquidation price, bankruptcy price and bad debt.
+        - `top_positions` lists up to 10 liquidating positions, the largest notional at the mark first, with their `account_id`, `account_address` (the wallet, `null` until the engine has resolved it), size, notional at the mark, liquidation price, bankruptcy price and bad debt.
 
         Errors: 400 `invalid_query` for a bad `shock`, 404 `not_found`, 404 `unsupported_chain`, 503 and 504 as elsewhere.
       parameters:
@@ -349,7 +349,7 @@ paths:
               examples:
                 btc_fall:
                   summary: BTC after a fall of 20% (top positions abbreviated)
-                  value: {"kind": "perpl_market_stress", "chain": "eip155:143", "perp_id": 1, "symbol": "BTC", "shock": -0.2, "p0": "82893.4", "p1": "66314.72", "liquidating": {"notional_usd": "509005.264832", "positions": 124, "accounts": 124}, "gap_bad_debt_usd": "35472.976652", "insurance_fund_usd": "182983.039136", "scr": 5.1583784730104, "no_bad_debt": false, "uncovered_usd": "0", "top_positions": [{"account_id": 2159, "side": "long", "size": "1.7201", "notional_usd": "142584.93734", "liq_price": "72944.9255451333", "bankruptcy_price": "69544.3219426553", "bad_debt_usd": "5555.238302"}, {"account_id": 2172, "side": "long", "size": "1.5044", "notional_usd": "124704.83096", "liq_price": "72073.2876871025", "bankruptcy_price": "68715.9942608329", "bad_debt_usd": "3612.476998"}], "coverage": ["perpl_snapshot_only", "perpl_bad_debt_is_floor"]}
+                  value: {"kind": "perpl_market_stress", "chain": "eip155:143", "perp_id": 1, "symbol": "BTC", "shock": -0.2, "p0": "82893.4", "p1": "66314.72", "liquidating": {"notional_usd": "509005.264832", "positions": 124, "accounts": 124}, "gap_bad_debt_usd": "35472.976652", "insurance_fund_usd": "182983.039136", "scr": 5.1583784730104, "no_bad_debt": false, "uncovered_usd": "0", "top_positions": [{"account_id": 2159, "account_address": "0x000000000000000000000000000000000000086f", "side": "long", "size": "1.7201", "notional_usd": "142584.93734", "liq_price": "72944.9255451333", "bankruptcy_price": "69544.3219426553", "bad_debt_usd": "5555.238302"}, {"account_id": 2172, "account_address": "0x000000000000000000000000000000000000087c", "side": "long", "size": "1.5044", "notional_usd": "124704.83096", "liq_price": "72073.2876871025", "bankruptcy_price": "68715.9942608329", "bad_debt_usd": "3612.476998"}], "coverage": ["perpl_snapshot_only", "perpl_bad_debt_is_floor"]}
         "400":
           $ref: '#/components/responses/InvalidRequest'
           description: The `shock` is 0, out of range or malformed, a parameter is unknown, or the `market` is malformed.
@@ -389,7 +389,7 @@ paths:
               examples:
                 fall_10:
                   summary: A fall of 10% (two of the 17 markets, top positions cut)
-                  value: {"kind": "perpl_stress", "chain": "eip155:143", "items": [{"perp_id": 1, "symbol": "BTC", "shock": -0.1, "p0": "82893.4", "p1": "74604.06", "liquidating": {"notional_usd": "184451.077944", "positions": 87, "accounts": 87}, "gap_bad_debt_usd": "2678.762141", "insurance_fund_usd": "182983.039136", "scr": 68.30880439256352, "no_bad_debt": false, "uncovered_usd": "0", "top_positions": [{"account_id": 2136, "side": "long", "size": "0.425", "notional_usd": "35229.695", "liq_price": "77198.4622395821", "bankruptcy_price": "73845.4265708199", "bad_debt_usd": "0"}]}, {"perp_id": 10, "symbol": "MON", "shock": -0.1, "p0": "0.025636", "p1": "0.0230724", "liquidating": {"notional_usd": "17912.972984", "positions": 11, "accounts": 11}, "gap_bad_debt_usd": "102.060335", "insurance_fund_usd": "22237.419694", "scr": 217.8850359969972, "no_bad_debt": false, "uncovered_usd": "0", "top_positions": [{"account_id": 543, "side": "long", "size": "330468", "notional_usd": "8471.877648", "liq_price": "0.0237047415401038", "bankruptcy_price": "0.0224577243785437", "bad_debt_usd": "0"}]}], "coverage": ["perpl_snapshot_only", "perpl_bad_debt_is_floor"]}
+                  value: {"kind": "perpl_stress", "chain": "eip155:143", "items": [{"perp_id": 1, "symbol": "BTC", "shock": -0.1, "p0": "82893.4", "p1": "74604.06", "liquidating": {"notional_usd": "184451.077944", "positions": 87, "accounts": 87}, "gap_bad_debt_usd": "2678.762141", "insurance_fund_usd": "182983.039136", "scr": 68.30880439256352, "no_bad_debt": false, "uncovered_usd": "0", "top_positions": [{"account_id": 2136, "account_address": "0x0000000000000000000000000000000000000858", "side": "long", "size": "0.425", "notional_usd": "35229.695", "liq_price": "77198.4622395821", "bankruptcy_price": "73845.4265708199", "bad_debt_usd": "0"}]}, {"perp_id": 10, "symbol": "MON", "shock": -0.1, "p0": "0.025636", "p1": "0.0230724", "liquidating": {"notional_usd": "17912.972984", "positions": 11, "accounts": 11}, "gap_bad_debt_usd": "102.060335", "insurance_fund_usd": "22237.419694", "scr": 217.8850359969972, "no_bad_debt": false, "uncovered_usd": "0", "top_positions": [{"account_id": 543, "account_address": "0x000000000000000000000000000000000000021f", "side": "long", "size": "330468", "notional_usd": "8471.877648", "liq_price": "0.0237047415401038", "bankruptcy_price": "0.0224577243785437", "bad_debt_usd": "0"}]}], "coverage": ["perpl_snapshot_only", "perpl_bad_debt_is_floor"]}
         "400":
           $ref: '#/components/responses/InvalidRequest'
           description: The `shock` is 0, out of range or malformed, or a parameter is unknown.
@@ -1283,9 +1283,12 @@ components:
     StressPosition:
       type: object
       additionalProperties: false
-      required: [account_id, side, size, notional_usd, liq_price, bankruptcy_price, bad_debt_usd]
+      required: [account_id, account_address, side, size, notional_usd, liq_price, bankruptcy_price, bad_debt_usd]
       properties:
         account_id: {type: integer, minimum: 0}
+        account_address:
+          description: The wallet address of the account, lowercase. `null` while the engine has not resolved this account id yet.
+          anyOf: [{$ref: '#/components/schemas/Address'}, {type: "null"}]
         side: {$ref: '#/components/schemas/Side'}
         size: {$ref: '#/components/schemas/Price'}
         notional_usd: {allOf: [{$ref: '#/components/schemas/Usd'}], description: "The notional at the mark before the shock."}
