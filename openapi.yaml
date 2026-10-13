@@ -1,0 +1,1469 @@
+openapi: 3.1.2
+info:
+  title: Sona Perpl risk engine
+  version: 1.0.0
+  summary: Internal reads of the Perpl exchange on Monad, called only by sona-api.
+  description: |
+    This service answers one question about Perpl, the perpetual futures exchange on Monad: where could it break, and who is exposed? It reads every open position of every market from the exchange contract, computes each position's liquidation price with the published formula, and returns the liquidation map of a market, a stress test with a Shock Cover Ratio, the concentration of positions, volume and liquidators, the history of liquidations, the funding and oracle gap of a market, and a risk card for one wallet. Everything it reads is public chain state and public Perpl market data. Nothing here holds a key, signs, trades or moves funds: it only reads. Only the public `sona-api` will call this service, and it will put these bodies inside its public answers. You call it directly to debug, or to see exactly what the public API will get.
+
+    ## Pick a chain
+
+    Only Monad, `eip155:143`, is served. The `{chain}` part of every path is a CAIP-2 chain id, and a value that is no CAIP-2 id answers 400 `invalid_id`, and any other chain answers 404 `unsupported_chain`.
+
+    | Container | Inside the Docker network | On the host |
+    |---|---|---|
+    | `perps-engine` | `http://perps-engine:8080` | `127.0.0.1:8201` |
+
+    Call it with curl, for example `curl http://127.0.0.1:8201/internal/v1/chains/eip155:143/perpl/markets`. Every body is one bare record, as in the other Sona engines: it starts with `kind` (the shape of the record) and `chain`, and ends with `coverage`. A list is a record with `items`, and a paged list also has `next_cursor`. Nothing wraps the record.
+
+    ## Data and freshness
+
+    The engine takes a **snapshot** every 30 s: it reads all markets and all positions at one block, a few blocks behind the head, and keeps the result in memory. Every route that needs positions answers from the latest snapshot and says which one in the `Sona-Block` and `Sona-Block-Time` headers, with the block and its time. The status route also gives them in its `snapshot`. The snapshot is exact in its inputs (every position, deposit, entry price and the mark come from the contract at that block), but a result is not a forecast: a trader can add collateral or close a position the second after the snapshot. Each route lists this limit in its `coverage`.
+
+    Before the first snapshot exists, the routes that need one answer 503 `upstream_unavailable` with `Retry-After: 5`. The first snapshot takes a few seconds after a start.
+
+    If refreshes keep failing, the last snapshot stays served and ages. Once it is older than four refresh intervals (2 minutes by default), the records built from it carry `perpl_snapshot_stale` and `/readyz` answers 503. `/healthz` stays 200 so that a stale engine is not restarted for a problem a restart does not fix.
+
+    A market is **priced** when its mark price is above zero. The market list and the stress summary hold the priced markets, and a perp id that has no mark price answers 404 `not_found` on the routes that compute from positions. The `status` field of a market is the raw number from the contract. In the recorded data every market with positions has 4, and a retired or never launched market has 0. A priced market can have no positions at all. Its numbers are then zero, and it has no bad debt.
+
+    The liquidation history, daily counts and keepers come from a database that holds the `PositionLiquidated` events of the exchange. When the backfill from the deployment block is not complete, `coverage` says `perpl_history_partial` and `/status` shows the backfill state.
+
+    ## Units
+
+    - A `market` in a path or in a query is a symbol such as `BTC` or `SOL_v2`, in any case, or the decimal perp id such as `1`.
+    - An **amount in USD** is a decimal string with up to 6 decimals and no trailing zeros, such as `"182983.039136"`. The collateral of Perpl is a dollar stablecoin with 6 decimals. A field that ends in `_usd` is such an amount.
+    - A **price** or a **size** is a decimal string with at most 15 significant digits and no trailing zeros. A mark, an oracle and an open interest size are exact, because they come straight from the contract's integers. A price or size that comes out of the math (a liquidation price, say) is rounded to 15 digits.
+    - A **ratio**, a **share** and a **rate** is a JSON number, such as `0.04` or `2e-5`. A share is between 0 and 1.
+    - `oracle_gap_bps` is the mark minus the oracle, divided by the oracle, in basis points (10,000 is 100%). It is positive when the mark is above the oracle.
+    - `funding_rate` is the funding rate of one funding interval as a fraction of notional, with the sign the contract reports. It is the contract's `fundingRatePct100k` divided by 100,000, so `2e-5` is 0.002%.
+    - `maint_margin_fraction` is the share of a position's notional that must stay as margin: 100 divided by the contract's maintenance divisor in hundredths, so a divisor of 2500 gives `0.04`. `max_leverage` is the contract's initial-margin divisor divided by 100, and the BTC market has 15 and 4%, which are the figures that Perpl publishes. A position is liquidated when its margin drops below its maintenance margin.
+    - A side is `long` or `short`. Times are RFC 3339 in UTC, days are `YYYY-MM-DD`, addresses and hashes are lowercase `0x` hex.
+
+    ## The risk math
+
+    For a position with entry price `E`, size `L`, deposit `D` and premium PnL `P`, and a side `s` of +1 for a long and -1 for a short: the maintenance margin is `MMR = E * L * maint_margin_fraction`, the liquidation price is `E + s * (MMR - D - P) / L` and the bankruptcy price is `E - s * (D + P) / L`, both floored at zero. Notional is `L` times the mark, leverage is notional over deposit, and the distance to liquidation is `s * (mark - liq) / mark`, where zero or less means liquidatable now. The formulas are the ones of the Perpl SDK, and the engine reproduces its test vectors.
+
+    - **Liquidation map.** Buckets of `bucket_bps` basis points of the mark cover plus and minus `range_pct` percent around it. Each position adds its notional at the mark, and one account, to the bucket that holds its liquidation price, split by side. A position outside the range is in `beyond_range`. The cumulative curves give, for each whole move of 1 to `range_pct` percent, the notional of the longs whose liquidation price is at or above `mark * (1 - x)` and of the shorts whose liquidation price is at or below `mark * (1 + x)`.
+    - **Stress.** A shock `x` moves the mark to `p1 = p0 * (1 + x)`. The liquidating set holds the longs with a liquidation price at or above `p1` when `x` is negative, and the shorts with a liquidation price at or below `p1` when `x` is positive. `gap_bad_debt_usd` is, over that set, the sum of size times how far the bankruptcy price is on the wrong side of `p1`: the loss beyond a trader's margin if every liquidation fills at `p1`. The insurance fund of the market is `insurance_fund_usd`. The **Shock Cover Ratio** is `scr`, the fund divided by the gap bad debt. It is `null` with `no_bad_debt: true` when there is no bad debt. `uncovered_usd` is the bad debt that the fund cannot pay.
+    - **Concentration.** A share is the notional of the top accounts over the total open notional of the scope, long and short together. An account holds one position per market, and the overall board adds up an account's notional over all markets. The volume shares come from Perpl's public leaderboard, as the top accounts' volume over the volume of all rows of that leaderboard.
+
+    ## Time budget
+
+    The request header `Sona-Deadline-Ms` is the most time, in milliseconds, that a call may take. It is 5000 when the header is absent or is not a whole number. When the budget runs out the answer is 504 `deadline_exceeded`, and a value of 0 or less answers 504 at once without reading anything. The HTTP server's own write timeout is 10 s, so a budget above 10000 cannot be used in full. `sona-api` sends the time it has left minus a small margin.
+
+    ## Response headers
+
+    A successful answer that is about a snapshot describes it in `Sona-*` headers: `Sona-Finality` is always `confirmed`, because the snapshot is a few blocks behind the head but the engine does not check finality, `Sona-Block` is the snapshot block and `Sona-Block-Time` is its Unix time. These are the same three headers that the x402 engine sends. The status route is about the engine and not about one block, so it sends none. Every route except the two probes also sends `X-Request-Id`, the trace ID of an incoming `traceparent` header or a random one. Quote it when you report a problem, because the service logs the cause of each 500 and 503 under that ID.
+
+    ## Errors
+
+    Every error is `application/problem+json` (RFC 9457 problem details) with `Cache-Control: no-store`. A typical body:
+
+    ```json
+    {"type":"urn:sona:problem:not_found","title":"Not found","status":404,"detail":"No market DOGE.","instance":"/internal/v1/chains/eip155:143/perpl/markets/DOGE","code":"not_found"}
+    ```
+
+    Branch on `code`, which is stable. The codes are the ones of the other Sona engines, and the cases that only this service has are told apart by `detail`. There are seven:
+
+    | Status | `code` | When |
+    |---|---|---|
+    | 400 | `invalid_query` | an unknown or repeated query parameter, or a value out of its range, or a malformed `cursor` or `market` filter |
+    | 400 | `invalid_id` | a `{chain}` that is no CAIP-2 id, or a malformed `{market}` or `{address}` in the path |
+    | 404 | `unsupported_chain` | a CAIP-2 chain other than `eip155:143` |
+    | 404 | `not_found` | no market has this symbol or perp id (or it has no mark price yet), the address has no Perpl account, or no route serves the path. The `detail` says which, and is `No such route.` for a path or method that no route serves |
+    | 500 | `internal` | anything unnamed, with the cause in the service log under the `X-Request-Id` |
+    | 503 | `upstream_unavailable` | the database or the chain data source did not answer, with `Retry-After: 1`, or no snapshot exists yet, with `Retry-After: 5` and `retry_after_s` of 5 |
+    | 504 | `deadline_exceeded` | the time budget ran out |
+
+    `instance` is the path of the request. If the caller disconnects before the answer is ready, the service counts the call as 499 and sends no body.
+
+    ## Coverage and limits
+
+    `coverage` is an array of codes in every record except the status. It lists the limits that apply to this answer, in a fixed order, and is empty when none applies. The status route gives each code a sentence, in its own `coverage` of `{code, note}` objects. The codes:
+
+    - `perpl_snapshot_only`: positions are read at one block, so collateral added or positions closed afterwards are not in the numbers.
+    - `perpl_bad_debt_is_floor`: gap bad debt assumes every liquidation fills at the shocked price. A real book fills worse, and the part of the fund inflow from positions that close above bankruptcy is ignored.
+    - `perpl_leaderboard_unavailable`: Perpl's public leaderboard could not be read, or the last copy is older than 30 minutes, so the volume shares or the rank are `null`.
+    - `perpl_history_partial`: the liquidation backfill is disabled or still running, so older events may be missing.
+    - `perpl_funding_from_snapshots`: the funding series starts when this engine started, and a gap means it was not running.
+    - `perpl_snapshot_stale`: the latest snapshot is older than four refresh intervals because refreshes are failing, so the numbers describe an earlier block (see `Sona-Block`).
+
+    ## How this differs from the public API
+
+    - The body is a bare record with `kind`, `chain` and `coverage`, and no `{data, meta}` envelope. The block and time of the snapshot are in the `Sona-*` headers, which `sona-api` turns into the `meta` of its own envelope. There is no `links` member. `sona-api` adds its own.
+    - There are no credits, rate limits, payment headers or authentication. Access is limited by the network: the service listens only on the Docker network and on `127.0.0.1`.
+    - There is no caching. Successful answers carry no `Cache-Control` or `ETag`.
+    - Only `GET` is used.
+servers:
+  - url: http://127.0.0.1:8201
+    description: perps-engine on the host, serving Monad (eip155:143)
+tags:
+  - name: Status
+    description: |
+      How fresh the snapshot is, which exchange implementation runs and how much history is indexed.
+  - name: Markets
+    description: |
+      The markets of Perpl with their mark, oracle, open interest, insurance fund, funding and cover ratios.
+  - name: Risk
+    description: |
+      The liquidation map and the stress test of a market, computed from every open position.
+  - name: Concentration
+    description: |
+      How concentrated positions, volume and liquidations are.
+  - name: Liquidations
+    description: |
+      The history of forced closes, newest first, and their count per day.
+  - name: Funding
+    description: |
+      The funding rate and the gap between mark and oracle over time.
+  - name: Accounts
+    description: |
+      The risk card of one wallet.
+  - name: Operations
+    description: |
+      Probes for the container health check and for operators. They have no body and no request ID.
+paths:
+  /internal/v1/chains/{chain}/perpl/status:
+    parameters:
+      - $ref: '#/components/parameters/Chain'
+    get:
+      operationId: getStatus
+      tags: [Status]
+      summary: Get the state of the engine
+      description: |
+        Call this to see whether the engine has a snapshot and how old it is. The record holds:
+
+        - `exchange`: the address of the Perpl exchange proxy that is read.
+        - `implementation` and `implementation_changed`: the address behind the proxy (the ERC-1967 implementation slot), which the engine reads on every refresh, and whether it differs from the address the engine was configured to expect. A `true` means that the exchange was upgraded and its formulas should be checked again before the numbers are trusted. `implementation` is `null` until the first read.
+        - `snapshot`: the `block` and `time` of the latest snapshot and its age in whole seconds, or `null` before the first one.
+        - `markets` and `positions`: how many priced markets and open positions the snapshot holds (0 before the first snapshot).
+        - `liquidations_indexed`: how many `PositionLiquidated` events the database holds.
+        - `backfill`: `complete` when the history reaches back to the deployment block, `running` while it is being read, `pending` before it starts, `retrying` while it waits to try a failed read again, and `disabled` when the engine has no key for the history source and keeps only what it has seen since it started.
+        - `paid_rpc_calls`: how many chain reads the RPC router billed to a paid provider since the start. It is 0 in normal operation.
+        - `coverage`: the five limits of the data, each with its code and a sentence, always in the same order. The other routes list the codes that apply to their answer in their own `coverage`.
+
+        The route answers 200 also before the first snapshot exists, then with `snapshot` `null` and no `Sona-*` header. It needs the database for `liquidations_indexed`.
+
+        Errors: 400 for a query parameter (this route takes none) or a chain that is no CAIP-2 id, 404 `unsupported_chain`, 503 `upstream_unavailable` when the database does not answer, and 504 `deadline_exceeded` when the budget runs out.
+      parameters:
+        - $ref: '#/components/parameters/DeadlineMs'
+      responses:
+        "200":
+          description: The body is the status. Besides the content headers only `X-Request-Id` is sent.
+          headers:
+            X-Request-Id: {$ref: '#/components/headers/RequestId'}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Status'}
+              examples:
+                running:
+                  summary: A running engine with a snapshot that is 4 s old
+                  value: {"kind": "perpl_status", "chain": "eip155:143", "exchange": "0x34b6552d57a35a1d042ccae1951bd1c370112a6f", "implementation": "0xa9ab97a404a0bca04d6a5b4a39995fea9e791b2a", "implementation_changed": false, "snapshot": {"block": 112777356, "time": "2026-10-12T14:21:57Z", "age_s": 4}, "markets": 17, "positions": 665, "liquidations_indexed": 3650, "backfill": "complete", "paid_rpc_calls": 0, "coverage": [{"code": "perpl_snapshot_only", "note": "Positions are read at one block. Collateral added or positions closed after that block are not in these numbers."}, {"code": "perpl_bad_debt_is_floor", "note": "Gap bad debt assumes every liquidation fills at the shocked price, so it is a floor. A real book fills worse, and the share of the fund inflow from positions that close above bankruptcy is ignored."}, {"code": "perpl_leaderboard_unavailable", "note": "The public leaderboard could not be read, so the volume shares or the rank that depend on it are left out."}, {"code": "perpl_history_partial", "note": "The liquidation history may be incomplete because the backfill of older events is disabled or still running. See backfill in the status."}, {"code": "perpl_funding_from_snapshots", "note": "The series is built from the snapshots this engine stored, so it starts when the engine started and a gap means the engine was not running."}]}
+                before_first_snapshot:
+                  summary: A started engine that has not finished its first snapshot
+                  value: {"kind": "perpl_status", "chain": "eip155:143", "exchange": "0x34b6552d57a35a1d042ccae1951bd1c370112a6f", "implementation": null, "implementation_changed": false, "snapshot": null, "markets": 0, "positions": 0, "liquidations_indexed": 0, "backfill": "running", "paid_rpc_calls": 0, "coverage": [{"code": "perpl_snapshot_only", "note": "Positions are read at one block. Collateral added or positions closed after that block are not in these numbers."}, {"code": "perpl_bad_debt_is_floor", "note": "Gap bad debt assumes every liquidation fills at the shocked price, so it is a floor. A real book fills worse, and the share of the fund inflow from positions that close above bankruptcy is ignored."}, {"code": "perpl_leaderboard_unavailable", "note": "The public leaderboard could not be read, so the volume shares or the rank that depend on it are left out."}, {"code": "perpl_history_partial", "note": "The liquidation history may be incomplete because the backfill of older events is disabled or still running. See backfill in the status."}, {"code": "perpl_funding_from_snapshots", "note": "The series is built from the snapshots this engine stored, so it starts when the engine started and a gap means the engine was not running."}]}
+        "400":
+          $ref: '#/components/responses/InvalidRequest'
+          description: The request has a query parameter. This route takes none.
+        "404":
+          $ref: '#/components/responses/NotFound'
+          description: The chain is not `eip155:143` (`unsupported_chain`), or the path is not a route (`not_found`).
+        "499": {$ref: '#/components/responses/ClientClosed'}
+        "500": {$ref: '#/components/responses/Internal'}
+        "503":
+          $ref: '#/components/responses/Unavailable'
+          description: The database did not answer. Retry after the `Retry-After` of 1 s.
+        "504":
+          $ref: '#/components/responses/DeadlineExceeded'
+  /internal/v1/chains/{chain}/perpl/markets:
+    parameters:
+      - $ref: '#/components/parameters/Chain'
+    get:
+      operationId: listMarkets
+      tags: [Markets]
+      summary: List the markets with their risk figures
+      description: |
+        Call this for the headline table: one item per priced market, in ascending order of perp id. An item holds:
+
+        - the identity: `perp_id`, `symbol`, `name` and the raw `status`;
+        - `mark` and `oracle` prices, `oracle_gap_bps` (the mark against the oracle, `null` without an oracle price) and `oracle_age_s`, the seconds between the oracle's own timestamp and the snapshot time. A stale oracle blocks liquidations, so watch this one;
+        - `long_oi` and `short_oi` with `size` in the base asset and `usd` at the mark. Perpl matches every trade, so both sides are equal;
+        - `positions`, the number of open positions, and `insurance_fund_usd`;
+        - `funding_rate` per funding interval, `max_leverage` and `maint_margin_fraction`;
+        - `scr_m10` and `scr_p10`: the Shock Cover Ratio when the mark falls or rises by 10%. A `null` ratio with `no_bad_debt_m10` or `no_bad_debt_p10` `true` means that the shock causes no bad debt. The stress route explains how it is computed.
+
+        Errors: 400 for a query parameter (this route takes none) or a chain that is no CAIP-2 id, 404 `unsupported_chain`, 503 `upstream_unavailable` before the first snapshot or when the database does not answer, and 504 `deadline_exceeded`.
+      parameters:
+        - $ref: '#/components/parameters/DeadlineMs'
+      responses:
+        "200":
+          description: The body is the market list of the latest snapshot. The `Sona-*` headers describe the snapshot.
+          headers: &dataHeaders
+            Sona-Finality: {$ref: '#/components/headers/SonaFinality'}
+            Sona-Block: {$ref: '#/components/headers/SonaBlock'}
+            Sona-Block-Time: {$ref: '#/components/headers/SonaBlockTime'}
+            X-Request-Id: {$ref: '#/components/headers/RequestId'}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Markets'}
+              examples:
+                abbreviated:
+                  summary: Three markets of the 17 (BTC and MON have positions, TAO has none)
+                  value: {"kind": "perpl_markets", "chain": "eip155:143", "items": [{"perp_id": 1, "symbol": "BTC", "name": "BTC Perp", "status": 4, "mark": "82893.4", "oracle": "82849.2", "oracle_gap_bps": 5.334994182200915, "oracle_age_s": 16, "long_oi": {"size": "8.28633", "usd": "686882.067222"}, "short_oi": {"size": "8.28633", "usd": "686882.067222"}, "positions": 246, "insurance_fund_usd": "182983.039136", "funding_rate": 2e-05, "max_leverage": 15, "maint_margin_fraction": 0.04, "scr_m10": 68.30880439256352, "scr_p10": 206.30567804874605, "no_bad_debt_m10": false, "no_bad_debt_p10": false}, {"perp_id": 10, "symbol": "MON", "name": "MON Perp", "status": 4, "mark": "0.025636", "oracle": "0.025649", "oracle_gap_bps": -5.06842372022301, "oracle_age_s": 17, "long_oi": {"size": "3543323", "usd": "90836.628428"}, "short_oi": {"size": "3543323", "usd": "90836.628428"}, "positions": 98, "insurance_fund_usd": "22237.419694", "funding_rate": 1e-05, "max_leverage": 10, "maint_margin_fraction": 0.05, "scr_m10": 217.8850359969972, "scr_p10": null, "no_bad_debt_m10": false, "no_bad_debt_p10": true}, {"perp_id": 80, "symbol": "TAO", "name": "TAO", "status": 4, "mark": "289.565", "oracle": "289.596", "oracle_gap_bps": -1.0704567742648379, "oracle_age_s": 15, "long_oi": {"size": "0", "usd": "0"}, "short_oi": {"size": "0", "usd": "0"}, "positions": 0, "insurance_fund_usd": "1000", "funding_rate": 0, "max_leverage": 5, "maint_margin_fraction": 0.1, "scr_m10": null, "scr_p10": null, "no_bad_debt_m10": true, "no_bad_debt_p10": true}], "coverage": ["perpl_snapshot_only", "perpl_bad_debt_is_floor"]}
+        "400":
+          $ref: '#/components/responses/InvalidRequest'
+          description: The request has a query parameter. This route takes none.
+        "404":
+          $ref: '#/components/responses/NotFound'
+          description: The chain is not `eip155:143` (`unsupported_chain`), or the path is not a route (`not_found`).
+        "499": {$ref: '#/components/responses/ClientClosed'}
+        "500": {$ref: '#/components/responses/Internal'}
+        "503":
+          $ref: '#/components/responses/Unavailable'
+          description: There is no snapshot yet (retry after 5 s) or the database did not answer (retry after 1 s), both `upstream_unavailable`.
+        "504":
+          $ref: '#/components/responses/DeadlineExceeded'
+  /internal/v1/chains/{chain}/perpl/markets/{market}:
+    parameters:
+      - $ref: '#/components/parameters/Chain'
+      - $ref: '#/components/parameters/Market'
+    get:
+      operationId: getMarket
+      tags: [Markets]
+      summary: Get one market in full
+      description: |
+        Call this for one market. The item has every field of the market list, and four more groups:
+
+        - `initial_margin_fraction`: the share of notional that a new position must post, 100 divided by the contract's initial-margin divisor. `max_leverage` is its inverse.
+        - `funding_interval`: the contract's `getFundingInterval()` value, 8571 on Monad. The unit is not stated in the contract's interface. The engine reads it as blocks, because the funding start is a block number.
+        - `funding_rate_clamp`: the largest absolute funding rate per interval, as a fraction.
+        - `ref_price_max_age_s`: the age after which the exchange stops trusting a reference price.
+        - `liquidation`: how a liquidation's proceeds are split, as fractions: `insurance`, `user` (the liquidated trader) and `protocol`, plus `btl`, the settings that the contract keeps for liquidations below a price threshold (`price_threshold`, the shares of `insurance`, `user`, `buyer` and `protocol`, and `restrict_buyers`). The `btl` names are the contract's.
+
+        `{market}` is a symbol in any case or a perp id. Errors: 404 `not_found` for an unknown market or one without a mark price, 400 `invalid_id` for a malformed `market` and `invalid_query` for a query parameter, 404 `unsupported_chain`, 503 and 504 as on the list.
+      parameters:
+        - $ref: '#/components/parameters/DeadlineMs'
+      responses:
+        "200":
+          description: The body is the market. The `Sona-*` headers describe the snapshot.
+          headers: *dataHeaders
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/MarketDetail'}
+              examples:
+                btc:
+                  summary: The BTC market
+                  value: {"kind": "perpl_market", "chain": "eip155:143", "perp_id": 1, "symbol": "BTC", "name": "BTC Perp", "status": 4, "mark": "82893.4", "oracle": "82849.2", "oracle_gap_bps": 5.334994182200915, "oracle_age_s": 16, "long_oi": {"size": "8.28633", "usd": "686882.067222"}, "short_oi": {"size": "8.28633", "usd": "686882.067222"}, "positions": 246, "insurance_fund_usd": "182983.039136", "funding_rate": 2e-05, "max_leverage": 15, "maint_margin_fraction": 0.04, "scr_m10": 68.30880439256352, "scr_p10": 206.30567804874605, "no_bad_debt_m10": false, "no_bad_debt_p10": false, "initial_margin_fraction": 0.06666666666666667, "funding_interval": 8571, "funding_rate_clamp": 0.0001, "ref_price_max_age_s": 60, "liquidation": {"insurance": 0.1, "user": 0.8, "protocol": 0.1, "btl": {"price_threshold": 0.95, "insurance": 0.25, "user": 0.25, "buyer": 0.25, "protocol": 0.25, "restrict_buyers": true}}, "coverage": ["perpl_snapshot_only", "perpl_bad_debt_is_floor"]}
+        "400":
+          $ref: '#/components/responses/InvalidRequest'
+          description: The `market` is malformed, or the request has a query parameter. This route takes none.
+        "404":
+          $ref: '#/components/responses/NotFound'
+          description: The market is unknown or has no mark price (`not_found`), the chain is not `eip155:143` (`unsupported_chain`), or the path is not a route.
+        "499": {$ref: '#/components/responses/ClientClosed'}
+        "500": {$ref: '#/components/responses/Internal'}
+        "503":
+          $ref: '#/components/responses/Unavailable'
+          description: There is no snapshot yet or the database did not answer (`upstream_unavailable`).
+        "504":
+          $ref: '#/components/responses/DeadlineExceeded'
+  /internal/v1/chains/{chain}/perpl/markets/{market}/liquidation-map:
+    parameters:
+      - $ref: '#/components/parameters/Chain'
+      - $ref: '#/components/parameters/Market'
+    get:
+      operationId: getLiquidationMap
+      tags: [Risk]
+      summary: Map where the positions of a market would be liquidated
+      description: |
+        Call this to see at which prices the open positions of a market get liquidated. `buckets` is the dense list of price buckets from `mark * (1 - range_pct%)` up to `mark * (1 + range_pct%)`. Their edges are multiples of `bucket_bps` basis points of the mark away from the mark, so one bucket starts exactly at the mark, and the two outermost buckets are narrower when the range is not a multiple of the width. Each bucket holds the notional at the mark (`long_notional_usd`, `short_notional_usd`) and the number of accounts (`long_accounts`, `short_accounts`) whose liquidation price lies in `[price_from, price_to)`. The top edge of the last bucket belongs to it. Longs normally liquidate below the mark and shorts above it. A position that is already liquidatable has its liquidation price on the other side of the mark and is counted there.
+
+        `beyond_range` adds up the positions whose liquidation price lies outside the range, with their notional and count per side. `cumulative` gives, for each whole move of `move_pct` 1 to `range_pct` percent, the notional and the number of positions that would be liquidated by a fall of that size (`long`) or a rise of that size (`short`). It counts every position, also those beyond the range or already liquidatable. Both curves never decrease.
+
+        `bucket_bps` is 5 to 500, 25 by default, and `range_pct` is 1 to 50, 20 by default. Errors: 400 `invalid_query` for a value out of range or an unknown parameter, 404 `not_found`, 404 `unsupported_chain`, 503 and 504 as elsewhere.
+      parameters:
+        - $ref: '#/components/parameters/BucketBps'
+        - $ref: '#/components/parameters/RangePct'
+        - $ref: '#/components/parameters/DeadlineMs'
+      responses:
+        "200":
+          description: The body is the map. The `Sona-*` headers describe the snapshot.
+          headers: *dataHeaders
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/LiquidationMap'}
+              examples:
+                btc:
+                  summary: BTC with 500 bps buckets and a range of 10% (abbreviated cumulative curves)
+                  value: {"kind": "perpl_liquidation_map", "chain": "eip155:143", "perp_id": 1, "symbol": "BTC", "mark": "82893.4", "bucket_bps": 500, "range_pct": 10, "buckets": [{"price_from": "74604.06", "price_to": "78748.73", "long_notional_usd": "124084.788328", "short_notional_usd": "0", "long_accounts": 42, "short_accounts": 0}, {"price_from": "78748.73", "price_to": "82893.4", "long_notional_usd": "80860.853832", "short_notional_usd": "0", "long_accounts": 45, "short_accounts": 0}, {"price_from": "82893.4", "price_to": "87038.07", "long_notional_usd": "0", "short_notional_usd": "23277.295654", "long_accounts": 0, "short_accounts": 19}, {"price_from": "87038.07", "price_to": "91182.74", "long_notional_usd": "0", "short_notional_usd": "139854.428744", "long_accounts": 0, "short_accounts": 26}], "beyond_range": {"long_notional_usd": "481936.425062", "short_notional_usd": "523750.342824", "long_positions": 84, "short_positions": 30}, "cumulative": {"long": [{"move_pct": 1, "notional_usd": "0", "positions": 0}, {"move_pct": 2, "notional_usd": "2997.425344", "positions": 4}, {"move_pct": 3, "notional_usd": "37539.934058", "positions": 24}, {"move_pct": 4, "notional_usd": "72530.896066", "positions": 40}, {"move_pct": 5, "notional_usd": "80860.853832", "positions": 45}, {"move_pct": 6, "notional_usd": "122494.063982", "positions": 66}, {"move_pct": 7, "notional_usd": "173815.02579", "positions": 75}, {"move_pct": 8, "notional_usd": "180486.286622", "positions": 78}, {"move_pct": 9, "notional_usd": "204944.813226", "positions": 86}, {"move_pct": 10, "notional_usd": "204945.64216", "positions": 87}], "short": [{"move_pct": 1, "notional_usd": "0", "positions": 0}, {"move_pct": 2, "notional_usd": "412.809132", "positions": 1}, {"move_pct": 3, "notional_usd": "20917.320556", "positions": 14}, {"move_pct": 4, "notional_usd": "23277.295654", "positions": 19}, {"move_pct": 5, "notional_usd": "23277.295654", "positions": 19}, {"move_pct": 6, "notional_usd": "62190.77335", "positions": 24}, {"move_pct": 7, "notional_usd": "126318.765458", "positions": 34}, {"move_pct": 8, "notional_usd": "137196.86634", "positions": 38}, {"move_pct": 9, "notional_usd": "157759.403144", "positions": 43}, {"move_pct": 10, "notional_usd": "163131.724398", "positions": 45}]}, "coverage": ["perpl_snapshot_only"]}
+        "400":
+          $ref: '#/components/responses/InvalidRequest'
+          description: A parameter is out of range, unknown or repeated, or the `market` is malformed.
+        "404":
+          $ref: '#/components/responses/NotFound'
+          description: The market is unknown or has no mark price (`not_found`), or the chain is not `eip155:143` (`unsupported_chain`).
+        "499": {$ref: '#/components/responses/ClientClosed'}
+        "500": {$ref: '#/components/responses/Internal'}
+        "503":
+          $ref: '#/components/responses/Unavailable'
+          description: There is no snapshot yet or the database did not answer (`upstream_unavailable`).
+        "504":
+          $ref: '#/components/responses/DeadlineExceeded'
+  /internal/v1/chains/{chain}/perpl/markets/{market}/stress:
+    parameters:
+      - $ref: '#/components/parameters/Chain'
+      - $ref: '#/components/parameters/Market'
+    get:
+      operationId: getStress
+      tags: [Risk]
+      summary: Stress one market with a price shock
+      description: |
+        Call this to see what a sudden move of the mark would do to a market. `shock` is the move as a fraction: `-0.1` is a fall of 10% and `0.05` a rise of 5%. It lies from -0.5 to 0.5, is not 0, and is -0.1 when absent. `p0` is the mark and `p1` the shocked price.
+
+        - `liquidating` holds the notional at `p1`, the number of positions and the number of accounts that the shock liquidates.
+        - `gap_bad_debt_usd` is the loss beyond the traders' margin if every liquidation fills at `p1`. It is a floor, as `coverage` says.
+        - `insurance_fund_usd` is the fund of the market.
+        - `scr` is the Shock Cover Ratio, the fund divided by the gap bad debt: 2.5 means that the fund covers the loss 2.5 times. It is `null` and `no_bad_debt` is `true` when the shock causes no bad debt.
+        - `uncovered_usd` is the bad debt that the fund cannot pay, which would fall on the rest of the system. It is 0 when `scr` is 1 or more.
+        - `top_positions` lists up to 10 liquidating positions, the largest notional at the mark first, with their size, notional at the mark, liquidation price, bankruptcy price and bad debt.
+
+        Errors: 400 `invalid_query` for a bad `shock`, 404 `not_found`, 404 `unsupported_chain`, 503 and 504 as elsewhere.
+      parameters:
+        - $ref: '#/components/parameters/Shock'
+        - $ref: '#/components/parameters/DeadlineMs'
+      responses:
+        "200":
+          description: The body is the stress result. The `Sona-*` headers describe the snapshot.
+          headers: *dataHeaders
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Stress'}
+              examples:
+                btc_fall:
+                  summary: BTC after a fall of 20% (top positions abbreviated)
+                  value: {"kind": "perpl_market_stress", "chain": "eip155:143", "perp_id": 1, "symbol": "BTC", "shock": -0.2, "p0": "82893.4", "p1": "66314.72", "liquidating": {"notional_usd": "509005.264832", "positions": 124, "accounts": 124}, "gap_bad_debt_usd": "35472.976652", "insurance_fund_usd": "182983.039136", "scr": 5.1583784730104, "no_bad_debt": false, "uncovered_usd": "0", "top_positions": [{"account_id": 2159, "side": "long", "size": "1.7201", "notional_usd": "142584.93734", "liq_price": "72944.9255451333", "bankruptcy_price": "69544.3219426553", "bad_debt_usd": "5555.238302"}, {"account_id": 2172, "side": "long", "size": "1.5044", "notional_usd": "124704.83096", "liq_price": "72073.2876871025", "bankruptcy_price": "68715.9942608329", "bad_debt_usd": "3612.476998"}], "coverage": ["perpl_snapshot_only", "perpl_bad_debt_is_floor"]}
+        "400":
+          $ref: '#/components/responses/InvalidRequest'
+          description: The `shock` is 0, out of range or malformed, a parameter is unknown, or the `market` is malformed.
+        "404":
+          $ref: '#/components/responses/NotFound'
+          description: The market is unknown or has no mark price (`not_found`), or the chain is not `eip155:143` (`unsupported_chain`).
+        "499": {$ref: '#/components/responses/ClientClosed'}
+        "500": {$ref: '#/components/responses/Internal'}
+        "503":
+          $ref: '#/components/responses/Unavailable'
+          description: There is no snapshot yet or the database did not answer (`upstream_unavailable`).
+        "504":
+          $ref: '#/components/responses/DeadlineExceeded'
+  /internal/v1/chains/{chain}/perpl/stress:
+    parameters:
+      - $ref: '#/components/parameters/Chain'
+    get:
+      operationId: getStressAll
+      tags: [Risk]
+      summary: Stress every market with the same shock
+      description: |
+        Call this for the headline table of a stress test: the result of the market stress route for every priced market, in ascending order of perp id, for one `shock`. The items are the same as there, with the same `top_positions`. A market without positions shows no liquidations and no bad debt.
+
+        `shock` works as on the market stress route.
+
+        Errors: 400 `invalid_query`, 404 `unsupported_chain`, 503 and 504 as elsewhere.
+      parameters:
+        - $ref: '#/components/parameters/Shock'
+        - $ref: '#/components/parameters/DeadlineMs'
+      responses:
+        "200":
+          description: The body holds one stress result per priced market. The `Sona-*` headers describe the snapshot.
+          headers: *dataHeaders
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/StressAll'}
+              examples:
+                fall_10:
+                  summary: A fall of 10% (two of the 17 markets, top positions cut)
+                  value: {"kind": "perpl_stress", "chain": "eip155:143", "items": [{"perp_id": 1, "symbol": "BTC", "shock": -0.1, "p0": "82893.4", "p1": "74604.06", "liquidating": {"notional_usd": "184451.077944", "positions": 87, "accounts": 87}, "gap_bad_debt_usd": "2678.762141", "insurance_fund_usd": "182983.039136", "scr": 68.30880439256352, "no_bad_debt": false, "uncovered_usd": "0", "top_positions": [{"account_id": 2136, "side": "long", "size": "0.425", "notional_usd": "35229.695", "liq_price": "77198.4622395821", "bankruptcy_price": "73845.4265708199", "bad_debt_usd": "0"}]}, {"perp_id": 10, "symbol": "MON", "shock": -0.1, "p0": "0.025636", "p1": "0.0230724", "liquidating": {"notional_usd": "17912.972984", "positions": 11, "accounts": 11}, "gap_bad_debt_usd": "102.060335", "insurance_fund_usd": "22237.419694", "scr": 217.8850359969972, "no_bad_debt": false, "uncovered_usd": "0", "top_positions": [{"account_id": 543, "side": "long", "size": "330468", "notional_usd": "8471.877648", "liq_price": "0.0237047415401038", "bankruptcy_price": "0.0224577243785437", "bad_debt_usd": "0"}]}], "coverage": ["perpl_snapshot_only", "perpl_bad_debt_is_floor"]}
+        "400":
+          $ref: '#/components/responses/InvalidRequest'
+          description: The `shock` is 0, out of range or malformed, or a parameter is unknown.
+        "404":
+          $ref: '#/components/responses/NotFound'
+          description: The chain is not `eip155:143` (`unsupported_chain`), or the path is not a route (`not_found`).
+        "499": {$ref: '#/components/responses/ClientClosed'}
+        "500": {$ref: '#/components/responses/Internal'}
+        "503":
+          $ref: '#/components/responses/Unavailable'
+          description: There is no snapshot yet or the database did not answer (`upstream_unavailable`).
+        "504":
+          $ref: '#/components/responses/DeadlineExceeded'
+  /internal/v1/chains/{chain}/perpl/concentration:
+    parameters:
+      - $ref: '#/components/parameters/Chain'
+    get:
+      operationId: getConcentration
+      tags: [Concentration]
+      summary: Show how concentrated positions, volume and liquidators are
+      description: |
+        Call this to see who holds the risk. The record has four parts besides `kind`, `chain` and `coverage`:
+
+        - `markets`: per priced market, in ascending order of perp id, the number of `positions`, the long, short and total notional at the mark, and `top1`, `top5` and `top10`, the share of the market's total notional that the largest 1, 5 and 10 accounts hold. The total is two-sided: the long notional plus the short notional, which is the `total_notional_usd` of the same item, so a share can be recomputed from the response. `top_accounts` lists up to 10 accounts, the largest first, with `account_id`, the wallet `address` (`null` when the engine has not seen it yet), the notional, the `share` and the number of `positions`.
+        - `overall`: the same over all markets, where an account's notional is added up across markets, with the number of `accounts` that hold any position.
+        - `volume`: the share of the trading volume that the top 1, 5 and 10 accounts hold on Perpl's public leaderboard, for the last day (`day`) and for all time (`all`). `rows` is the number of leaderboard rows, `total_volume_usd` their volume (the leaderboard counts both sides of each trade) and `top10_volume_usd` the volume of the 10 largest. A period is `null` when the leaderboard could not be read, and `coverage` has `perpl_leaderboard_unavailable`.
+        - `keepers`: the liquidators. The `items` are the 10 addresses that sent the most liquidation transactions, with their count and their `share` of all `total` liquidations indexed, between `first_block` and `last_block`. `total` is 0 and `items` is empty before any liquidation is indexed.
+
+        Errors: 400 for a query parameter (this route takes none) or a chain that is no CAIP-2 id, 404 `unsupported_chain`, 503 and 504 as elsewhere.
+      parameters:
+        - $ref: '#/components/parameters/DeadlineMs'
+      responses:
+        "200":
+          description: The body is the concentration. The `Sona-*` headers describe the snapshot.
+          headers: *dataHeaders
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Concentration'}
+              examples:
+                abbreviated:
+                  summary: Two markets of the 17, the overall board and the keepers (lists cut)
+                  value: {"kind": "perpl_concentration", "chain": "eip155:143", "markets": [{"perp_id": 1, "symbol": "BTC", "positions": 246, "long_notional_usd": "686882.067222", "short_notional_usd": "686882.067222", "total_notional_usd": "1373764.134444", "top1": 0.19477259534679403, "top5": 0.5191037528073343, "top10": 0.6476793707226236, "top_accounts": [{"account_id": 4848, "address": "0x7e842a5d75249257036d6bde1887874131e77ad1", "notional_usd": "267571.60586", "share": 0.19477259534679403, "positions": 1}, {"account_id": 2159, "address": null, "notional_usd": "142584.93734", "share": 0.10379142515444109, "positions": 1}]}, {"perp_id": 10, "symbol": "MON", "positions": 98, "long_notional_usd": "90836.628428", "short_notional_usd": "90836.628428", "total_notional_usd": "181673.256856", "top1": 0.16503829879466253, "top5": 0.6195281942967096, "top10": 0.8418038660319705, "top_accounts": [{"account_id": 4159, "address": null, "notional_usd": "29983.045248", "share": 0.16503829879466253, "positions": 1}, {"account_id": 5098, "address": null, "notional_usd": "27701.979604", "share": 0.15248242962891048, "positions": 1}]}], "overall": {"accounts": 453, "total_notional_usd": "3094786.79389", "top1": 0.1691687715915103, "top5": 0.4475398070136747, "top10": 0.5828521917998443, "top_accounts": [{"account_id": 4848, "address": "0x7e842a5d75249257036d6bde1887874131e77ad1", "notional_usd": "523541.28026", "share": 0.1691687715915103, "positions": 2}, {"account_id": 2159, "address": null, "notional_usd": "280291.53542", "share": 0.09056893223577665, "positions": 2}]}, "volume": {"day": {"rows": 1186, "total_volume_usd": "8431220.5", "top10_volume_usd": "5985962.555", "top1": 0.182, "top5": 0.527, "top10": 0.71}, "all": {"rows": 5457, "total_volume_usd": "612473190.25", "top10_volume_usd": "263363471.8075", "top1": 0.094, "top5": 0.301, "top10": 0.43}}, "keepers": {"total": 3650, "first_block": 54774510, "last_block": 112770000, "items": [{"address": "0xb3b0f0a1745ae45224930d85e1fcc7f731d374a3", "liquidations": 1893, "share": 0.5186}, {"address": "0x8dea7a0184076c4ca4e877f39357bfaf32aa9f33", "liquidations": 1757, "share": 0.4814}]}, "coverage": ["perpl_snapshot_only"]}
+        "400":
+          $ref: '#/components/responses/InvalidRequest'
+          description: The request has a query parameter. This route takes none.
+        "404":
+          $ref: '#/components/responses/NotFound'
+          description: The chain is not `eip155:143` (`unsupported_chain`), or the path is not a route (`not_found`).
+        "499": {$ref: '#/components/responses/ClientClosed'}
+        "500": {$ref: '#/components/responses/Internal'}
+        "503":
+          $ref: '#/components/responses/Unavailable'
+          description: There is no snapshot yet or the database did not answer (`upstream_unavailable`).
+        "504":
+          $ref: '#/components/responses/DeadlineExceeded'
+  /internal/v1/chains/{chain}/perpl/liquidations:
+    parameters:
+      - $ref: '#/components/parameters/Chain'
+    get:
+      operationId: listLiquidations
+      tags: [Liquidations]
+      summary: List liquidations, newest first
+      description: |
+        Call this for the feed of forced closes. The list is ordered by block and log index, newest first, and `market` narrows it to one market, also one that was retired. An item holds the `block`, `time`, transaction hash `tx` and `log_index` of the event, the `perp_id` and `market` symbol (the perp id as a string when the engine knows no symbol), the `account_id` and `account_address` (the wallet, `null` until the engine has resolved it) and `side` of the liquidated position, the `mark` and the `liq_price` the position was closed at, the liquidated `size` and the `remaining_size` of the position (0 for a full liquidation), `notional_usd`, whether it closed `on_order_book`, and the `keeper`, the address that sent the transaction (`null` while the engine has not resolved it).
+
+        The `liq_price` of an event is the price that the position was closed at, which can differ from the trigger price of its liquidation. Do not compare it with the price of the liquidation map.
+
+        A page holds `limit` items, 50 by default and 200 at most. When more are left, the record has a `next_cursor`, the cursor of the last item. Pass it back as `cursor`, with the same `market`, for the next page. The last page has no `next_cursor`. A cursor stays valid: newer events never move older ones.
+
+        Errors: 400 `invalid_query` for a bad `limit`, `cursor` or `market`, 404 `not_found`, 404 `unsupported_chain`, 503 and 504 as elsewhere.
+      parameters:
+        - $ref: '#/components/parameters/MarketFilter'
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/DeadlineMs'
+      responses:
+        "200":
+          description: The body is one page of liquidations. The `Sona-*` headers describe the snapshot, not the events.
+          headers: *dataHeaders
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/LiquidationPage'}
+              examples:
+                first_page:
+                  summary: A page with a full and a partial liquidation (abbreviated)
+                  value: {"kind": "perpl_liquidations", "chain": "eip155:143", "items": [{"block": 111612151, "time": "2026-10-08T12:38:55Z", "tx": "0xf97e85318d616f6caeed0a2c3e622b4038a0abdb1b940961c18984820a42ae20", "log_index": 34, "perp_id": 70, "market": "VVV", "account_id": 2312, "account_address": "0x36017474f58205ff4f2d8e3ccfea64b2573ea676", "side": "long", "mark": "22.9458", "liq_price": "22.937", "size": "1.71", "remaining_size": "0", "notional_usd": "39.237318", "on_order_book": true, "keeper": "0x8dea7a0184076c4ca4e877f39357bfaf32aa9f33"}, {"block": 101294109, "time": "2026-09-02T09:36:13Z", "tx": "0xe3790ed4e7c3849f313137c7a6a548404ca6e7b2da7a4cb6534be7678012f7fc", "log_index": 286, "perp_id": 50, "market": "ZEC", "account_id": 1409, "account_address": "0xc8569285dd64cd11deb8de7971bf786b714ba3cc", "side": "long", "mark": "813.44", "liq_price": "812.27", "size": "5.0424", "remaining_size": "2.7762", "notional_usd": "4101.689856", "on_order_book": true, "keeper": "0x8dea7a0184076c4ca4e877f39357bfaf32aa9f33"}], "next_cursor": "101294109.286", "coverage": []}
+        "400":
+          $ref: '#/components/responses/InvalidRequest'
+          description: A parameter is out of range, unknown or malformed.
+        "404":
+          $ref: '#/components/responses/NotFound'
+          description: The `market` is unknown (`not_found`), or the chain is not `eip155:143` (`unsupported_chain`).
+        "499": {$ref: '#/components/responses/ClientClosed'}
+        "500": {$ref: '#/components/responses/Internal'}
+        "503":
+          $ref: '#/components/responses/Unavailable'
+          description: There is no snapshot yet or the database did not answer (`upstream_unavailable`).
+        "504":
+          $ref: '#/components/responses/DeadlineExceeded'
+  /internal/v1/chains/{chain}/perpl/liquidations/daily:
+    parameters:
+      - $ref: '#/components/parameters/Chain'
+    get:
+      operationId: listLiquidationsDaily
+      tags: [Liquidations]
+      summary: Count liquidations per day
+      description: |
+        Call this to draw the history of liquidations. The answer has one item per UTC day for the last `days` days, ending on today, in ascending order of day. A day without any liquidation is there with `count` 0 and `notional_usd` `"0"`, so the series has no gaps. Today's item is partial. `market` narrows it to one market.
+
+        `days` is 1 to 400, 90 by default. Errors: 400 `invalid_query` for a bad `days` or `market`, 404 `not_found`, 404 `unsupported_chain`, 503 and 504 as elsewhere.
+      parameters:
+        - $ref: '#/components/parameters/MarketFilter'
+        - $ref: '#/components/parameters/Days'
+        - $ref: '#/components/parameters/DeadlineMs'
+      responses:
+        "200":
+          description: The body is the daily series. The `Sona-*` headers describe the snapshot, not the events.
+          headers: *dataHeaders
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Daily'}
+              examples:
+                five_days:
+                  summary: The last five days (example numbers)
+                  value: {"kind": "perpl_liquidations_daily", "chain": "eip155:143", "items": [{"day": "2026-10-08", "count": 1, "notional_usd": "412.3"}, {"day": "2026-10-09", "count": 0, "notional_usd": "0"}, {"day": "2026-10-10", "count": 3, "notional_usd": "5821.77"}, {"day": "2026-10-11", "count": 0, "notional_usd": "0"}, {"day": "2026-10-12", "count": 2, "notional_usd": "1290.4"}], "coverage": []}
+        "400":
+          $ref: '#/components/responses/InvalidRequest'
+          description: A parameter is out of range, unknown or malformed.
+        "404":
+          $ref: '#/components/responses/NotFound'
+          description: The `market` is unknown (`not_found`), or the chain is not `eip155:143` (`unsupported_chain`).
+        "499": {$ref: '#/components/responses/ClientClosed'}
+        "500": {$ref: '#/components/responses/Internal'}
+        "503":
+          $ref: '#/components/responses/Unavailable'
+          description: There is no snapshot yet or the database did not answer (`upstream_unavailable`).
+        "504":
+          $ref: '#/components/responses/DeadlineExceeded'
+  /internal/v1/chains/{chain}/perpl/funding:
+    parameters:
+      - $ref: '#/components/parameters/Chain'
+    get:
+      operationId: getFunding
+      tags: [Funding]
+      summary: Get the funding rate and the oracle gap of a market over time
+      description: |
+        Call this to draw the funding rate and the gap between mark and oracle of one market. `market` is required. The series covers the last `hours` hours, ascending in time. Each point holds the `time` and `block` of a stored snapshot, the `mark` and `oracle` prices, `gap_bps` (the mark against the oracle in basis points, `null` without an oracle price) and the `funding_rate` of the interval.
+
+        The engine stores a snapshot about every 30 s, so a long window is thinned: the point is the last stored snapshot of each `step_s`-second window. `step_s` is the window length, a multiple of 30 s chosen to give about 720 points, so 30 for a window of up to 6 hours and 840 for 7 days. The series is empty for a market that was not stored in the window. It starts when the engine started, and `coverage` says so.
+
+        `hours` is 1 to 168, 24 by default. Errors: 400 `invalid_query` for a missing `market` or a bad `hours`, 404 `not_found`, 404 `unsupported_chain`, 503 and 504 as elsewhere.
+      parameters:
+        - $ref: '#/components/parameters/MarketRequired'
+        - $ref: '#/components/parameters/Hours'
+        - $ref: '#/components/parameters/DeadlineMs'
+      responses:
+        "200":
+          description: The body is the series. The `Sona-*` headers describe the snapshot.
+          headers: *dataHeaders
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Funding'}
+              examples:
+                btc:
+                  summary: BTC for the last hour (example numbers, three points)
+                  value: {"kind": "perpl_funding", "chain": "eip155:143", "perp_id": 1, "symbol": "BTC", "hours": 1, "step_s": 30, "items": [{"time": "2026-10-12T14:20:57Z", "block": 112777206, "mark": "82871.5", "oracle": "82840.1", "gap_bps": 3.7904348256460336, "funding_rate": 2e-05}, {"time": "2026-10-12T14:21:27Z", "block": 112777281, "mark": "82882.9", "oracle": "82846.7", "gap_bps": 4.369516226958949, "funding_rate": 2e-05}, {"time": "2026-10-12T14:21:57Z", "block": 112777356, "mark": "82893.4", "oracle": "82849.2", "gap_bps": 5.334994182200915, "funding_rate": 2e-05}], "coverage": ["perpl_funding_from_snapshots"]}
+        "400":
+          $ref: '#/components/responses/InvalidRequest'
+          description: The `market` is missing or malformed, or `hours` is out of range, or a parameter is unknown.
+        "404":
+          $ref: '#/components/responses/NotFound'
+          description: The `market` is unknown (`not_found`), or the chain is not `eip155:143` (`unsupported_chain`).
+        "499": {$ref: '#/components/responses/ClientClosed'}
+        "500": {$ref: '#/components/responses/Internal'}
+        "503":
+          $ref: '#/components/responses/Unavailable'
+          description: There is no snapshot yet or the database did not answer (`upstream_unavailable`).
+        "504":
+          $ref: '#/components/responses/DeadlineExceeded'
+  /internal/v1/chains/{chain}/perpl/accounts/{address}:
+    parameters:
+      - $ref: '#/components/parameters/Chain'
+      - $ref: '#/components/parameters/AccountAddress'
+    get:
+      operationId: getAccount
+      tags: [Accounts]
+      summary: Get the risk card of one wallet
+      description: |
+        Call this for the open positions of one wallet and how close each is to liquidation. The address is looked up on the exchange (`getAccountByAddr`) and its positions are taken from the latest snapshot. The record holds:
+
+        - the account: `account_id`, `address`, `balance_usd` (the free balance), `locked_usd` (the part of the balance that the exchange has locked) and `frozen`;
+        - `total_notional_usd` and `total_deposit_usd` over the positions, and `min_distance`, the smallest distance to liquidation of any position (`null` without positions);
+        - `positions`, the largest notional first. A position has the `size`, `entry_price`, `mark_price`, `deposit_usd`, `premium_pnl_usd` (the premium PnL that the contract keeps for the position and that the liquidation price takes into account), `notional_usd` at the mark, `maintenance_margin_usd`, `leverage` (`null` with a zero deposit), `liq_price`, `bankruptcy_price`, `distance` (the fraction of the mark to the liquidation price, 0 or less means liquidatable now) and `oi_share`, the position's share of the open notional of its own side of the market;
+        - `standing`: the rank, PnL and volume of the wallet on Perpl's public leaderboard for the last day and for all time. A period is `null` when the wallet is not on the board or the board could not be read (`coverage` has `perpl_leaderboard_unavailable` in that case).
+
+        A wallet with an account and no positions answers 200 with empty `positions`. The address is taken in any case, without a checksum check. Errors: 404 `not_found` when the address has no Perpl account, 400 `invalid_id` for a malformed address, 404 `unsupported_chain`, 503 `upstream_unavailable` also when the chain read for the account fails, and 504 as elsewhere.
+      parameters:
+        - $ref: '#/components/parameters/DeadlineMs'
+      responses:
+        "200":
+          description: The body is the wallet card. The `Sona-*` headers describe the snapshot.
+          headers: *dataHeaders
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Wallet'}
+              examples:
+                two_positions:
+                  summary: The largest BTC account at the recorded block (standing is example data)
+                  value: {"kind": "perpl_account", "chain": "eip155:143", "account_id": 4848, "address": "0x7e842a5d75249257036d6bde1887874131e77ad1", "balance_usd": "50.008795", "locked_usd": "0", "frozen": false, "total_notional_usd": "523541.28026", "total_deposit_usd": "103911.165361", "min_distance": 0.12112139393331167, "positions": [{"perp_id": 1, "market": "BTC", "side": "short", "size": "3.2279", "entry_price": "84658.3786529541", "mark_price": "82893.4", "deposit_usd": "41142.950629", "premium_pnl_usd": "6.77859", "notional_usd": "267571.60586", "maintenance_margin_usd": "10930.751218", "leverage": 6.503461753941381, "liq_price": "94020.1860202347", "bankruptcy_price": "97406.5211663529", "distance": 0.13423005957331635, "oi_share": 0.389545190693588}, {"perp_id": 20, "market": "ETH", "side": "long", "size": "101.145", "entry_price": "2709.87829696655", "mark_price": "2530.72", "deposit_usd": "62768.214732", "premium_pnl_usd": "60.687", "notional_usd": "255969.6744", "maintenance_margin_usd": "13704.532017", "leverage": 4.078014254394645, "liq_price": "2224.19566594509", "bankruptcy_price": "2088.70175109676", "distance": 0.12112139393331167, "oi_share": 0.5375592593379962}], "standing": {"day": {"rank": 1, "pnl_usd": "1200", "volume_usd": "90000"}, "all": {"rank": 3, "pnl_usd": "4800", "volume_usd": "700000"}}, "coverage": ["perpl_snapshot_only"]}
+        "400":
+          $ref: '#/components/responses/InvalidRequest'
+          description: The address is not `0x` and 40 hex digits, or the request has a query parameter.
+        "404":
+          $ref: '#/components/responses/NotFound'
+          description: The address has no Perpl account (`not_found`), or the chain is not `eip155:143` (`unsupported_chain`).
+        "499": {$ref: '#/components/responses/ClientClosed'}
+        "500": {$ref: '#/components/responses/Internal'}
+        "503":
+          $ref: '#/components/responses/Unavailable'
+          description: There is no snapshot yet, or the database or the chain did not answer (`upstream_unavailable`).
+        "504":
+          $ref: '#/components/responses/DeadlineExceeded'
+  /healthz:
+    get:
+      operationId: getHealth
+      tags: [Operations]
+      summary: Check that the process is alive
+      description: |
+        The liveness probe. It answers 200 with an empty body as long as the process runs, whether or not a snapshot exists. It sends no `X-Request-Id` and no `Sona-*` header.
+      responses:
+        "200": {description: The process is running. The body is empty.}
+  /readyz:
+    get:
+      operationId: getReady
+      tags: [Operations]
+      summary: Check that the service can answer requests
+      description: |
+        The readiness probe. It answers 200 once the migrations ran and the first snapshot exists and is not stale, and 503 before that or when the snapshot is older than four refresh intervals, with an empty body: unlike the data routes, a 503 here has no problem body and no `Retry-After`.
+      responses:
+        "200": {description: The first snapshot exists. The body is empty.}
+        "503": {description: "No snapshot exists yet, or the latest one is stale. The body is empty."}
+components:
+  parameters:
+    Chain:
+      name: chain
+      in: path
+      required: true
+      description: |
+        The chain, as a CAIP-2 id. Only `eip155:143` (Monad) is served. A value that is no CAIP-2 id answers 400 `invalid_id`, and any other chain answers 404 `unsupported_chain`. It is part of the path, so there is no default.
+      schema: {type: string}
+      examples:
+        monad: {summary: Monad, value: "eip155:143"}
+    Market:
+      name: market
+      in: path
+      required: true
+      description: |
+        A market, as its symbol in any case (`BTC`, `sol_v2`) or its decimal perp id (`1`). Read the symbols from the market list. A value that is no symbol or id of a priced market answers 404 `not_found`, and a value with other characters than letters, digits, `_`, `.` and `-` answers 400 `invalid_id`.
+      schema: {$ref: '#/components/schemas/MarketRef'}
+      examples:
+        symbol: {summary: A symbol, value: BTC}
+        perp_id: {summary: A perp id, value: "1"}
+    MarketFilter:
+      name: market
+      in: query
+      required: false
+      description: |
+        Only this market, as its symbol in any case or its decimal perp id. Without it every market is counted. A market that has no mark price any more can still be named here, because its history stays. An unknown market answers 404 `not_found`.
+      schema: {$ref: '#/components/schemas/MarketRef'}
+      examples:
+        symbol: {summary: A symbol, value: ETH}
+    MarketRequired:
+      name: market
+      in: query
+      required: true
+      description: |
+        The market, as its symbol in any case or its decimal perp id. It is required, because a series of all markets would be too long. An unknown market answers 404 `not_found`.
+      schema: {$ref: '#/components/schemas/MarketRef'}
+      examples:
+        symbol: {summary: A symbol, value: BTC}
+    BucketBps:
+      name: bucket_bps
+      in: query
+      required: false
+      description: |
+        The width of a price bucket in basis points of the mark, from 5 to 500. The default is 25, which is 0.25%.
+      schema: {type: integer, minimum: 5, maximum: 500, default: 25}
+    RangePct:
+      name: range_pct
+      in: query
+      required: false
+      description: |
+        How far the map reaches on each side of the mark, in percent, from 1 to 50. The default is 20.
+      schema: {type: integer, minimum: 1, maximum: 50, default: 20}
+    Shock:
+      name: shock
+      in: query
+      required: false
+      description: |
+        The price move as a fraction of the mark: `-0.1` is a fall of 10%, `0.05` a rise of 5%. It lies from -0.5 to 0.5 and is not 0. Write a plus sign as `%2B`. Exponents, `NaN` and `Inf` are refused. The default is -0.1.
+      schema: {type: number, minimum: -0.5, maximum: 0.5, default: -0.1}
+      examples:
+        fall_20: {summary: A fall of 20%, value: -0.2}
+        rise_5: {summary: A rise of 5%, value: 0.05}
+    Limit:
+      name: limit
+      in: query
+      required: false
+      description: |
+        The most items to return in one page, from 1 to 200. The default is 50.
+      schema: {type: integer, minimum: 1, maximum: 200, default: 50}
+    Cursor:
+      name: cursor
+      in: query
+      required: false
+      description: |
+        The `next_cursor` of the previous page, `<block>.<log_index>`. Send the same `market` again. Without a cursor the list starts at the newest liquidation.
+      schema: {$ref: '#/components/schemas/Cursor'}
+    Days:
+      name: days
+      in: query
+      required: false
+      description: |
+        How many UTC days the series covers, ending today, from 1 to 400. The default is 90.
+      schema: {type: integer, minimum: 1, maximum: 400, default: 90}
+    Hours:
+      name: hours
+      in: query
+      required: false
+      description: |
+        How many hours back the series reaches, from 1 to 168. The default is 24.
+      schema: {type: integer, minimum: 1, maximum: 168, default: 24}
+    AccountAddress:
+      name: address
+      in: path
+      required: true
+      description: |
+        The wallet address: `0x` and 40 hex digits in any case, without a checksum check. A malformed address answers 400 `invalid_id`, and an address without a Perpl account answers 404 `not_found`.
+      schema: {$ref: '#/components/schemas/AddressAnyCase'}
+      examples:
+        wallet: {summary: The largest BTC account, value: "0x7e842a5d75249257036d6bde1887874131e77ad1"}
+    DeadlineMs:
+      name: Sona-Deadline-Ms
+      in: header
+      required: false
+      description: |
+        The most time, in milliseconds, that this call may take. The default is 5000, used when the header is absent or is not a whole number (`abc` and `1.5` are ignored). When the time runs out before the data source has answered, the call ends with 504 `deadline_exceeded`. A value of 0 or less answers 504 at once, without reading anything.
+      schema: {type: integer, format: int64}
+      examples:
+        default: {summary: The default budget of 5 s, value: 5000}
+        short: {summary: Wait at most 400 ms, value: 400}
+  headers:
+    SonaFinality:
+      description: |
+        How settled the data is. It is always `confirmed` here: the snapshot is a few blocks behind the head, and the engine does not check whether the chain has finalized that block. It is present on every successful answer about a snapshot, and absent from the status answer, from errors and from the probes.
+      required: true
+      schema: {type: string, enum: [confirmed]}
+      example: confirmed
+    SonaBlock:
+      description: |
+        The block of the snapshot that the answer was computed from, as a decimal integer. It is absent from every answer that is not a successful answer about a snapshot.
+      required: true
+      schema: {type: integer, minimum: 0}
+      example: 112777356
+    SonaBlockTime:
+      description: |
+        The time of the snapshot's block as Unix time in whole seconds (UTC), for example `1791814917`, which is 2026-10-12T14:21:57Z. It is absent whenever `Sona-Block` is absent.
+      required: true
+      schema: {type: integer, minimum: 1}
+      example: 1791814917
+    RequestId:
+      description: A 32-character hex ID that identifies this one request in the service log. It is the trace ID of the incoming `traceparent` header, or a random one. Quote it when you report a problem. It is present on every answer except `/healthz` and `/readyz`.
+      schema: {type: string, pattern: '^[0-9a-f]{32}$', examples: [4bf92f3577b34da6a3ce929d0e0e4736]}
+    RetryAfter:
+      description: How many whole seconds to wait before you send the request again. It is 5 while the first snapshot is still being read, and 1 otherwise on `upstream_unavailable`.
+      required: true
+      schema: {type: integer, enum: [1, 5]}
+    NoStore:
+      description: |
+        Always `no-store` on an error answer. It tells caches not to keep a problem, because the same request may succeed a moment later. Successful answers carry no `Cache-Control`.
+      required: true
+      schema: {type: string, enum: [no-store]}
+  responses:
+    InvalidRequest:
+      description: A parameter is not accepted. That is `invalid_query` for an unknown or repeated query parameter, a value outside its range, or a malformed cursor or market filter, and `invalid_id` for a chain that is no CAIP-2 id or a malformed market or address in the path. Each route says which parameters it takes.
+      headers: &problemHeaders
+        Cache-Control: {$ref: '#/components/headers/NoStore'}
+        X-Request-Id: {$ref: '#/components/headers/RequestId'}
+      content:
+        application/problem+json:
+          schema: {allOf: [{$ref: '#/components/schemas/Problem'}, {properties: {code: {enum: [invalid_query, invalid_id]}}}]}
+          examples:
+            bucket:
+              summary: A bucket width out of range
+              value: {"type": "urn:sona:problem:invalid_query", "title": "Invalid query", "status": 400, "detail": "bucket_bps is a whole number from 5 to 500.", "instance": "/internal/v1/chains/eip155:143/perpl/markets/BTC/liquidation-map", "code": "invalid_query"}
+            chain:
+              summary: A chain that is no CAIP-2 id
+              value: {"type": "urn:sona:problem:invalid_id", "title": "Invalid identifier", "status": 400, "detail": "The chain is not a CAIP-2 identifier.", "instance": "/internal/v1/chains/abc/perpl/markets", "code": "invalid_id"}
+    NotFound:
+      description: Nothing is there. That is `unsupported_chain` for a CAIP-2 chain other than `eip155:143`, and `not_found` for an unknown market or one without a mark price, an address without a Perpl account, or a path or method that no route serves. The `detail` says which, and is `No such route.` for the last one.
+      headers: *problemHeaders
+      content:
+        application/problem+json:
+          schema: {allOf: [{$ref: '#/components/schemas/Problem'}, {properties: {code: {enum: [unsupported_chain, not_found]}}}]}
+          examples:
+            unsupported_chain:
+              summary: Another chain
+              value: {"type": "urn:sona:problem:unsupported_chain", "title": "Unsupported chain", "status": 404, "detail": "Only eip155:143 is served.", "instance": "/internal/v1/chains/eip155:1/perpl/markets", "code": "unsupported_chain"}
+            unknown_market:
+              summary: A market that does not exist
+              value: {"type": "urn:sona:problem:not_found", "title": "Not found", "status": 404, "detail": "No market DOGE.", "instance": "/internal/v1/chains/eip155:143/perpl/markets/DOGE", "code": "not_found"}
+            no_account:
+              summary: A wallet that never used Perpl
+              value: {"type": "urn:sona:problem:not_found", "title": "Not found", "status": 404, "detail": "This address has no Perpl account.", "instance": "/internal/v1/chains/eip155:143/perpl/accounts/0x0000000000000000000000000000000000000001", "code": "not_found"}
+            unknown_route:
+              summary: A path that no route serves
+              value: {"type": "urn:sona:problem:not_found", "title": "Not found", "status": 404, "detail": "No such route.", "instance": "/nope", "code": "not_found"}
+    Internal:
+      description: The service failed in a way it has no name for (`internal`). It is not worth retrying until the cause is fixed. Report the `X-Request-Id`, because the cause is in the service log under that ID.
+      headers: *problemHeaders
+      content:
+        application/problem+json:
+          schema: {allOf: [{$ref: '#/components/schemas/Problem'}, {properties: {code: {enum: [internal]}}}]}
+    Unavailable:
+      description: The service cannot answer right now (`upstream_unavailable`). Either no snapshot exists yet, which is usual for a few seconds after a start, and `Retry-After` and `retry_after_s` are 5, or the database or the chain data source did not answer, and they are 1.
+      headers:
+        Cache-Control: {$ref: '#/components/headers/NoStore'}
+        Retry-After: {$ref: '#/components/headers/RetryAfter'}
+        X-Request-Id: {$ref: '#/components/headers/RequestId'}
+      content:
+        application/problem+json:
+          schema: {allOf: [{$ref: '#/components/schemas/Problem'}, {properties: {code: {enum: [upstream_unavailable]}}}]}
+          examples:
+            not_ready:
+              summary: The first snapshot is not ready
+              value: {"type": "urn:sona:problem:upstream_unavailable", "title": "Data source unavailable", "status": 503, "detail": "The first snapshot of the exchange is not ready yet.", "instance": "/internal/v1/chains/eip155:143/perpl/markets", "code": "upstream_unavailable", "retry_after_s": 5}
+            database:
+              summary: The database did not answer
+              value: {"type": "urn:sona:problem:upstream_unavailable", "title": "Data source unavailable", "status": 503, "detail": "A data source did not answer.", "instance": "/internal/v1/chains/eip155:143/perpl/liquidations", "code": "upstream_unavailable", "retry_after_s": 1}
+    DeadlineExceeded:
+      description: The time budget ran out (`deadline_exceeded`). Either a data source had not answered within `Sona-Deadline-Ms` (5000 ms when the header is absent), or the header was 0 or less. Retry, with a larger budget if the call is a slow one.
+      headers: *problemHeaders
+      content:
+        application/problem+json:
+          schema: {allOf: [{$ref: '#/components/schemas/Problem'}, {properties: {code: {enum: [deadline_exceeded]}}}]}
+    ClientClosed:
+      description: The caller closed the connection before the answer was ready. The status is the one nginx uses for that, and the body is empty. A real caller never sees it, because it has already gone. It only shows in the service's request metrics.
+      headers:
+        X-Request-Id: {$ref: '#/components/headers/RequestId'}
+  schemas:
+    Problem:
+      description: An error in the RFC 9457 `application/problem+json` format. Switch on `code`. The text fields are for people.
+      type: object
+      additionalProperties: false
+      required: [type, title, status, code]
+      properties:
+        type:
+          type: string
+          description: A URN that identifies the kind of error, `urn:sona:problem:` followed by the `code`.
+          examples: ["urn:sona:problem:not_found"]
+        title:
+          type: string
+          description: A short, fixed, human-readable name for the kind of error.
+          examples: [Not found]
+        status:
+          type: integer
+          description: The HTTP status code of the answer, repeated in the body.
+          examples: [404]
+        detail:
+          type: string
+          description: A sentence explaining what went wrong for this request. The wording may change, so do not parse it.
+          examples: [No market DOGE.]
+        instance:
+          type: string
+          description: The path of the request that failed.
+          examples: ["/internal/v1/chains/eip155:143/perpl/markets/DOGE"]
+        code:
+          type: string
+          description: |
+            The stable machine-readable reason. `invalid_query` a query parameter is not accepted. `invalid_id` the chain, market or address in the path is malformed. `unsupported_chain` the chain is not served. `not_found` no priced market has this symbol or id, the address has no Perpl account, or no route serves the path. `internal` an unexpected failure. `upstream_unavailable` a data source did not answer, or no snapshot exists yet. `deadline_exceeded` the time budget ran out.
+          enum: [invalid_query, invalid_id, unsupported_chain, not_found, internal, upstream_unavailable, deadline_exceeded]
+        retry_after_s:
+          type: integer
+          description: How many seconds to wait before a retry. Only on 503, where it is 5 before the first snapshot and 1 otherwise.
+          enum: [1, 5]
+    MarketRef:
+      type: string
+      description: A market, as its symbol in any case or its decimal perp id.
+      pattern: '^[A-Za-z0-9_.-]{1,32}$'
+      examples: [BTC]
+    Cursor:
+      type: string
+      description: A position in the liquidation list, `<block>.<log_index>` of the last item of the previous page.
+      pattern: '^[0-9]+\.[0-9]+$'
+      examples: ["112777000.12"]
+    Address:
+      type: string
+      description: A 20-byte address written as `0x` followed by 40 lowercase hex digits.
+      pattern: '^0x[0-9a-f]{40}$'
+      examples: ["0x7e842a5d75249257036d6bde1887874131e77ad1"]
+    AddressAnyCase:
+      type: string
+      description: A 20-byte address written as `0x` followed by 40 hex digits in any case.
+      pattern: '^0x[0-9a-fA-F]{40}$'
+      examples: ["0x7e842a5d75249257036d6bde1887874131e77ad1"]
+    Hash:
+      type: string
+      description: A 32-byte hash written as `0x` followed by 64 lowercase hex digits.
+      pattern: '^0x[0-9a-f]{64}$'
+      examples: ["0x0555c662a9339b2f65acd2379e5bdfceb3efd6efd84d451a53d9a4f90267d000"]
+    Usd:
+      type: string
+      description: An amount in US dollars as a decimal string with up to 6 decimals and no trailing zeros. It can be negative for a PnL.
+      pattern: '^-?[0-9]+(\.[0-9]+)?$'
+      examples: ["182983.039136"]
+    Price:
+      type: string
+      description: A price, or a size in the base asset, as a decimal string with no trailing zeros. Values read straight from the chain are exact, and computed values have at most 15 significant digits.
+      pattern: '^[0-9]+(\.[0-9]+)?$'
+      examples: ["82893.4"]
+    Share:
+      type: number
+      description: A share of a total, from 0 to 1.
+      minimum: 0
+      maximum: 1
+    Time:
+      type: string
+      format: date-time
+      description: A moment in RFC 3339, UTC, in whole seconds.
+      examples: ["2026-10-12T14:21:57Z"]
+    Day:
+      type: string
+      format: date
+      description: A UTC day, `YYYY-MM-DD`.
+      examples: ["2026-10-12"]
+    Side:
+      type: string
+      enum: [long, short]
+    CoverageCode:
+      type: string
+      description: The code of one limit of the data. The status route gives each code a sentence.
+      enum: [perpl_snapshot_only, perpl_bad_debt_is_floor, perpl_leaderboard_unavailable, perpl_history_partial, perpl_funding_from_snapshots, perpl_snapshot_stale]
+    CoverageNote:
+      description: One limit of the data, with a stable code and a sentence.
+      type: object
+      additionalProperties: false
+      required: [code, note]
+      properties:
+        code: {$ref: '#/components/schemas/CoverageCode'}
+        note:
+          type: string
+          description: A sentence that explains the limit. The wording may change, so branch on `code`.
+    Chain:
+      type: string
+      description: The CAIP-2 id of the chain.
+      enum: ["eip155:143"]
+    Coverage:
+      type: array
+      description: The codes of the limits that apply to this answer, in a fixed order. It is empty when none applies. The status route explains each code.
+      items: {$ref: '#/components/schemas/CoverageCode'}
+    Status:
+      description: How fresh the snapshot is, which exchange implementation runs and how much history is indexed.
+      type: object
+      additionalProperties: false
+      required: [kind, chain, exchange, implementation, implementation_changed, snapshot, markets, positions, liquidations_indexed, backfill, paid_rpc_calls, coverage]
+      properties:
+        kind: {type: string, enum: [perpl_status]}
+        chain: {$ref: '#/components/schemas/Chain'}
+        exchange:
+          allOf: [{$ref: '#/components/schemas/Address'}]
+          description: The Perpl exchange proxy that is read.
+        implementation:
+          description: The address behind the proxy at the last read, `null` before the first read.
+          anyOf: [{$ref: '#/components/schemas/Address'}, {type: "null"}]
+        implementation_changed:
+          type: boolean
+          description: Whether the implementation differs from the one the engine expects. A `true` means that the exchange was upgraded.
+        snapshot:
+          description: The latest snapshot, `null` before the first one.
+          anyOf:
+            - type: object
+              additionalProperties: false
+              required: [block, time, age_s]
+              properties:
+                block: {type: integer, minimum: 0}
+                time: {$ref: '#/components/schemas/Time'}
+                age_s: {type: integer, minimum: 0, description: "The whole seconds between now and the time of the snapshot's block."}
+            - type: "null"
+        markets:
+          type: integer
+          minimum: 0
+          description: The number of priced markets in the snapshot.
+        positions:
+          type: integer
+          minimum: 0
+          description: The number of open positions in the snapshot.
+        liquidations_indexed:
+          type: integer
+          minimum: 0
+          description: The number of liquidation events in the database.
+        backfill:
+          type: string
+          enum: [complete, running, pending, retrying, disabled]
+          description: The state of the liquidation history. `complete` reaches back to the deployment block, `running` is being read, `pending` has not started, `retrying` waits to try again after a failed read and `disabled` has no source, so it keeps only events seen since the start.
+        paid_rpc_calls:
+          type: integer
+          minimum: 0
+          description: Chain reads that the RPC router billed to a paid provider since the start.
+        coverage:
+          type: array
+          description: The five limits of the data, always in the same order.
+          items: {$ref: '#/components/schemas/CoverageNote'}
+    Oi:
+      type: object
+      additionalProperties: false
+      required: [size, usd]
+      properties:
+        size:
+          $ref: '#/components/schemas/Price'
+        usd:
+          $ref: '#/components/schemas/Usd'
+    Market:
+      type: object
+      additionalProperties: false
+      required: [perp_id, symbol, name, status, mark, oracle, oracle_gap_bps, oracle_age_s, long_oi, short_oi, positions, insurance_fund_usd, funding_rate, max_leverage, maint_margin_fraction, scr_m10, scr_p10, no_bad_debt_m10, no_bad_debt_p10]
+      properties: &marketProperties
+        perp_id: {type: integer, minimum: 0, description: "The id of the perp on the exchange."}
+        symbol: {type: string, description: "The symbol, such as `BTC`."}
+        name: {type: string, description: "The name that the contract gives the market, such as `BTC Perp`."}
+        status: {type: integer, minimum: 0, maximum: 255, description: "The raw status number from the contract."}
+        mark: {$ref: '#/components/schemas/Price'}
+        oracle: {$ref: '#/components/schemas/Price'}
+        oracle_gap_bps:
+          description: The mark against the oracle in basis points, positive when the mark is above. `null` when the oracle price is 0.
+          type: [number, "null"]
+        oracle_age_s: {type: integer, minimum: 0, description: "The whole seconds between the oracle's own timestamp and the snapshot time."}
+        long_oi: {$ref: '#/components/schemas/Oi'}
+        short_oi: {$ref: '#/components/schemas/Oi'}
+        positions: {type: integer, minimum: 0, description: "The number of open positions."}
+        insurance_fund_usd: {$ref: '#/components/schemas/Usd'}
+        funding_rate: {type: number, description: "The funding rate of one funding interval as a fraction of notional."}
+        max_leverage: {type: number, minimum: 0, description: "The largest leverage that a new position may take."}
+        maint_margin_fraction: {type: number, minimum: 0, description: "The share of notional that must stay as margin."}
+        scr_m10:
+          description: The Shock Cover Ratio when the mark falls by 10%, `null` without bad debt.
+          type: [number, "null"]
+          minimum: 0
+        scr_p10:
+          description: The Shock Cover Ratio when the mark rises by 10%, `null` without bad debt.
+          type: [number, "null"]
+          minimum: 0
+        no_bad_debt_m10: {type: boolean, description: "Whether a fall of 10% causes no bad debt."}
+        no_bad_debt_p10: {type: boolean, description: "Whether a rise of 10% causes no bad debt."}
+    Btl:
+      type: object
+      additionalProperties: false
+      required: [price_threshold, insurance, user, buyer, protocol, restrict_buyers]
+      properties:
+        price_threshold: {type: number, minimum: 0, description: "The price threshold of the contract's below-threshold liquidation settings, as a fraction."}
+        insurance: {type: number, minimum: 0}
+        user: {type: number, minimum: 0}
+        buyer: {type: number, minimum: 0}
+        protocol: {type: number, minimum: 0}
+        restrict_buyers: {type: boolean}
+    LiquidationSplit:
+      type: object
+      additionalProperties: false
+      required: [insurance, user, protocol, btl]
+      properties:
+        insurance: {type: number, minimum: 0, maximum: 1, description: "The share of a liquidation's proceeds that goes to the insurance fund."}
+        user: {type: number, minimum: 0, maximum: 1, description: "The share that goes back to the liquidated trader."}
+        protocol: {type: number, minimum: 0, maximum: 1, description: "The share that goes to the protocol."}
+        btl: {$ref: '#/components/schemas/Btl'}
+    Markets:
+      description: The priced markets of the latest snapshot.
+      type: object
+      additionalProperties: false
+      required: [kind, chain, items, coverage]
+      properties:
+        kind: {type: string, enum: [perpl_markets]}
+        chain: {$ref: '#/components/schemas/Chain'}
+        items:
+          type: array
+          description: One item per priced market, in ascending order of perp id.
+          items: {$ref: '#/components/schemas/Market'}
+        coverage: {$ref: '#/components/schemas/Coverage'}
+    MarketDetail:
+      description: One market in full.
+      type: object
+      additionalProperties: false
+      required: [kind, chain, perp_id, symbol, name, status, mark, oracle, oracle_gap_bps, oracle_age_s, long_oi, short_oi, positions, insurance_fund_usd, funding_rate, max_leverage, maint_margin_fraction, scr_m10, scr_p10, no_bad_debt_m10, no_bad_debt_p10, initial_margin_fraction, funding_interval, funding_rate_clamp, ref_price_max_age_s, liquidation, coverage]
+      properties:
+        kind: {type: string, enum: [perpl_market]}
+        chain: {$ref: '#/components/schemas/Chain'}
+        <<: *marketProperties
+        initial_margin_fraction: {type: number, minimum: 0, description: "The share of notional that a new position must post."}
+        funding_interval: {type: integer, minimum: 0, description: "The contract's `getFundingInterval()` value. The unit is read as blocks."}
+        funding_rate_clamp: {type: number, minimum: 0, description: "The largest absolute funding rate per interval, as a fraction."}
+        ref_price_max_age_s: {type: integer, minimum: 0, description: "The age in seconds after which a reference price is no longer trusted."}
+        liquidation: {$ref: '#/components/schemas/LiquidationSplit'}
+        coverage: {$ref: '#/components/schemas/Coverage'}
+    Bucket:
+      type: object
+      additionalProperties: false
+      required: [price_from, price_to, long_notional_usd, short_notional_usd, long_accounts, short_accounts]
+      properties:
+        price_from: {$ref: '#/components/schemas/Price'}
+        price_to: {$ref: '#/components/schemas/Price'}
+        long_notional_usd: {$ref: '#/components/schemas/Usd'}
+        short_notional_usd: {$ref: '#/components/schemas/Usd'}
+        long_accounts: {type: integer, minimum: 0}
+        short_accounts: {type: integer, minimum: 0}
+    BeyondRange:
+      type: object
+      additionalProperties: false
+      required: [long_notional_usd, short_notional_usd, long_positions, short_positions]
+      properties:
+        long_notional_usd: {$ref: '#/components/schemas/Usd'}
+        short_notional_usd: {$ref: '#/components/schemas/Usd'}
+        long_positions: {type: integer, minimum: 0}
+        short_positions: {type: integer, minimum: 0}
+    CumulativePoint:
+      type: object
+      additionalProperties: false
+      required: [move_pct, notional_usd, positions]
+      properties:
+        move_pct: {type: integer, minimum: 1, maximum: 50, description: "The size of the price move in whole percent."}
+        notional_usd: {$ref: '#/components/schemas/Usd'}
+        positions: {type: integer, minimum: 0}
+    LiquidationMap:
+      description: The liquidation map of one market.
+      type: object
+      additionalProperties: false
+      required: [kind, chain, perp_id, symbol, mark, bucket_bps, range_pct, buckets, beyond_range, cumulative, coverage]
+      properties:
+        kind: {type: string, enum: [perpl_liquidation_map]}
+        chain: {$ref: '#/components/schemas/Chain'}
+        perp_id: {type: integer, minimum: 0}
+        symbol: {type: string}
+        mark: {$ref: '#/components/schemas/Price'}
+        bucket_bps: {type: integer, minimum: 5, maximum: 500}
+        range_pct: {type: integer, minimum: 1, maximum: 50}
+        buckets:
+          type: array
+          description: The price buckets in ascending order of price, with no gaps.
+          items: {$ref: '#/components/schemas/Bucket'}
+        beyond_range: {$ref: '#/components/schemas/BeyondRange'}
+        cumulative:
+          type: object
+          additionalProperties: false
+          required: [long, short]
+          properties:
+            long:
+              type: array
+              description: One point per whole percent, from 1 to `range_pct`, for a fall of the mark.
+              items: {$ref: '#/components/schemas/CumulativePoint'}
+            short:
+              type: array
+              description: One point per whole percent, from 1 to `range_pct`, for a rise of the mark.
+              items: {$ref: '#/components/schemas/CumulativePoint'}
+        coverage: {$ref: '#/components/schemas/Coverage'}
+    StressPosition:
+      type: object
+      additionalProperties: false
+      required: [account_id, side, size, notional_usd, liq_price, bankruptcy_price, bad_debt_usd]
+      properties:
+        account_id: {type: integer, minimum: 0}
+        side: {$ref: '#/components/schemas/Side'}
+        size: {$ref: '#/components/schemas/Price'}
+        notional_usd: {allOf: [{$ref: '#/components/schemas/Usd'}], description: "The notional at the mark before the shock."}
+        liq_price: {$ref: '#/components/schemas/Price'}
+        bankruptcy_price: {$ref: '#/components/schemas/Price'}
+        bad_debt_usd: {allOf: [{$ref: '#/components/schemas/Usd'}], description: "The loss beyond the position's margin if it fills at the shocked price."}
+    StressItem:
+      description: The stress result of one market.
+      type: object
+      additionalProperties: false
+      required: [perp_id, symbol, shock, p0, p1, liquidating, gap_bad_debt_usd, insurance_fund_usd, scr, no_bad_debt, uncovered_usd, top_positions]
+      properties: &stressProperties
+        perp_id: {type: integer, minimum: 0}
+        symbol: {type: string}
+        shock: {type: number, minimum: -0.5, maximum: 0.5, description: "The price move as a fraction of the mark."}
+        p0: {allOf: [{$ref: '#/components/schemas/Price'}], description: "The mark before the shock."}
+        p1: {allOf: [{$ref: '#/components/schemas/Price'}], description: "The mark after the shock."}
+        liquidating:
+          type: object
+          additionalProperties: false
+          required: [notional_usd, positions, accounts]
+          properties:
+            notional_usd: {allOf: [{$ref: '#/components/schemas/Usd'}], description: "The notional of the liquidating positions at the shocked price."}
+            positions: {type: integer, minimum: 0}
+            accounts: {type: integer, minimum: 0}
+        gap_bad_debt_usd: {$ref: '#/components/schemas/Usd'}
+        insurance_fund_usd: {$ref: '#/components/schemas/Usd'}
+        scr:
+          description: The insurance fund divided by the gap bad debt, `null` without bad debt.
+          type: [number, "null"]
+          minimum: 0
+        no_bad_debt: {type: boolean, description: "Whether the shock causes no bad debt."}
+        uncovered_usd: {$ref: '#/components/schemas/Usd'}
+        top_positions:
+          type: array
+          maxItems: 10
+          description: Up to 10 liquidating positions, the largest notional first, ties by account id.
+          items: {$ref: '#/components/schemas/StressPosition'}
+    Stress:
+      description: The stress result of one market.
+      type: object
+      additionalProperties: false
+      required: [kind, chain, perp_id, symbol, shock, p0, p1, liquidating, gap_bad_debt_usd, insurance_fund_usd, scr, no_bad_debt, uncovered_usd, top_positions, coverage]
+      properties:
+        kind: {type: string, enum: [perpl_market_stress]}
+        chain: {$ref: '#/components/schemas/Chain'}
+        <<: *stressProperties
+        coverage: {$ref: '#/components/schemas/Coverage'}
+    StressAll:
+      description: The stress result of every priced market for one shock.
+      type: object
+      additionalProperties: false
+      required: [kind, chain, items, coverage]
+      properties:
+        kind: {type: string, enum: [perpl_stress]}
+        chain: {$ref: '#/components/schemas/Chain'}
+        items:
+          type: array
+          description: One result per priced market, in ascending order of perp id.
+          items: {$ref: '#/components/schemas/StressItem'}
+        coverage: {$ref: '#/components/schemas/Coverage'}
+    AccountShare:
+      type: object
+      additionalProperties: false
+      required: [account_id, address, notional_usd, share, positions]
+      properties:
+        account_id: {type: integer, minimum: 0}
+        address:
+          description: The wallet of the account, `null` when the engine has not seen it.
+          anyOf: [{$ref: '#/components/schemas/Address'}, {type: "null"}]
+        notional_usd: {$ref: '#/components/schemas/Usd'}
+        share: {$ref: '#/components/schemas/Share'}
+        positions: {type: integer, minimum: 1}
+    MarketConcentration:
+      type: object
+      additionalProperties: false
+      required: [perp_id, symbol, positions, long_notional_usd, short_notional_usd, total_notional_usd, top1, top5, top10, top_accounts]
+      properties:
+        perp_id: {type: integer, minimum: 0}
+        symbol: {type: string}
+        positions: {type: integer, minimum: 0}
+        long_notional_usd: {$ref: '#/components/schemas/Usd'}
+        short_notional_usd: {$ref: '#/components/schemas/Usd'}
+        total_notional_usd: {$ref: '#/components/schemas/Usd'}
+        top1: {$ref: '#/components/schemas/Share'}
+        top5: {$ref: '#/components/schemas/Share'}
+        top10: {$ref: '#/components/schemas/Share'}
+        top_accounts:
+          type: array
+          maxItems: 10
+          items: {$ref: '#/components/schemas/AccountShare'}
+    OverallConcentration:
+      type: object
+      additionalProperties: false
+      required: [accounts, total_notional_usd, top1, top5, top10, top_accounts]
+      properties:
+        accounts: {type: integer, minimum: 0, description: "The number of accounts that hold any position."}
+        total_notional_usd: {$ref: '#/components/schemas/Usd'}
+        top1: {$ref: '#/components/schemas/Share'}
+        top5: {$ref: '#/components/schemas/Share'}
+        top10: {$ref: '#/components/schemas/Share'}
+        top_accounts:
+          type: array
+          maxItems: 10
+          items: {$ref: '#/components/schemas/AccountShare'}
+    VolumeShares:
+      type: object
+      additionalProperties: false
+      required: [rows, total_volume_usd, top10_volume_usd, top1, top5, top10]
+      properties:
+        rows: {type: integer, minimum: 0, description: "The number of leaderboard rows."}
+        total_volume_usd: {$ref: '#/components/schemas/Usd'}
+        top10_volume_usd: {$ref: '#/components/schemas/Usd'}
+        top1: {$ref: '#/components/schemas/Share'}
+        top5: {$ref: '#/components/schemas/Share'}
+        top10: {$ref: '#/components/schemas/Share'}
+    Keeper:
+      type: object
+      additionalProperties: false
+      required: [address, liquidations, share]
+      properties:
+        address: {$ref: '#/components/schemas/Address'}
+        liquidations: {type: integer, minimum: 0}
+        share: {$ref: '#/components/schemas/Share'}
+    Concentration:
+      description: How concentrated positions, volume and liquidators are.
+      type: object
+      additionalProperties: false
+      required: [kind, chain, markets, overall, volume, keepers, coverage]
+      properties:
+        kind: {type: string, enum: [perpl_concentration]}
+        chain: {$ref: '#/components/schemas/Chain'}
+        markets:
+          type: array
+          items: {$ref: '#/components/schemas/MarketConcentration'}
+        overall: {$ref: '#/components/schemas/OverallConcentration'}
+        volume:
+          type: object
+          additionalProperties: false
+          required: [day, all]
+          properties:
+            day:
+              description: The shares on the leaderboard of the last day, `null` when it could not be read.
+              anyOf: [{$ref: '#/components/schemas/VolumeShares'}, {type: "null"}]
+            all:
+              description: The shares on the all-time leaderboard, `null` when it could not be read.
+              anyOf: [{$ref: '#/components/schemas/VolumeShares'}, {type: "null"}]
+        keepers:
+          type: object
+          additionalProperties: false
+          required: [total, first_block, last_block, items]
+          properties:
+            total: {type: integer, minimum: 0, description: "The number of liquidations indexed."}
+            first_block: {type: integer, minimum: 0, description: "The block of the oldest indexed liquidation, 0 when there is none."}
+            last_block: {type: integer, minimum: 0, description: "The block of the newest indexed liquidation, 0 when there is none."}
+            items:
+              type: array
+              maxItems: 10
+              description: The keepers with the most liquidations, the most first, ties by address.
+              items: {$ref: '#/components/schemas/Keeper'}
+        coverage: {$ref: '#/components/schemas/Coverage'}
+    Liquidation:
+      type: object
+      additionalProperties: false
+      required: [block, time, tx, log_index, perp_id, market, account_id, account_address, side, mark, liq_price, size, remaining_size, notional_usd, on_order_book, keeper]
+      properties:
+        block: {type: integer, minimum: 0}
+        time: {$ref: '#/components/schemas/Time'}
+        tx: {$ref: '#/components/schemas/Hash'}
+        log_index: {type: integer, minimum: 0}
+        perp_id: {type: integer, minimum: 0}
+        market: {type: string, description: "The symbol of the market, or its perp id as a string when the engine knows no symbol."}
+        account_id: {type: integer, minimum: 0}
+        account_address:
+          description: The wallet address of the liquidated account, lowercase. `null` while the engine has not resolved this account id yet. The engine resolves ids in the background after it indexes the event, so a recent liquidation can show `null` for a few refreshes, and an id the exchange has no account for stays `null`.
+          anyOf: [{$ref: '#/components/schemas/Address'}, {type: "null"}]
+        side: {$ref: '#/components/schemas/Side'}
+        mark: {allOf: [{$ref: '#/components/schemas/Price'}], description: "The mark price at the liquidation."}
+        liq_price: {allOf: [{$ref: '#/components/schemas/Price'}], description: "The price that the position was closed at."}
+        size: {allOf: [{$ref: '#/components/schemas/Price'}], description: "The liquidated size in the base asset."}
+        remaining_size: {allOf: [{$ref: '#/components/schemas/Price'}], description: "The size that is left of the position, 0 for a full liquidation."}
+        notional_usd: {$ref: '#/components/schemas/Usd'}
+        on_order_book: {type: boolean}
+        keeper:
+          description: The address that sent the liquidation transaction, `null` while it is not resolved.
+          anyOf: [{$ref: '#/components/schemas/Address'}, {type: "null"}]
+    LiquidationPage:
+      description: One page of liquidations.
+      type: object
+      additionalProperties: false
+      required: [kind, chain, items, coverage]
+      properties:
+        kind: {type: string, enum: [perpl_liquidations]}
+        chain: {$ref: '#/components/schemas/Chain'}
+        items:
+          type: array
+          description: The liquidations, newest first.
+          items: {$ref: '#/components/schemas/Liquidation'}
+        next_cursor:
+          description: Send it as `cursor` to get the next page. Absent on the last page.
+          allOf: [{$ref: '#/components/schemas/Cursor'}]
+        coverage: {$ref: '#/components/schemas/Coverage'}
+    DailyItem:
+      type: object
+      additionalProperties: false
+      required: [day, count, notional_usd]
+      properties:
+        day: {$ref: '#/components/schemas/Day'}
+        count: {type: integer, minimum: 0}
+        notional_usd: {$ref: '#/components/schemas/Usd'}
+    Daily:
+      description: The liquidations per UTC day.
+      type: object
+      additionalProperties: false
+      required: [kind, chain, items, coverage]
+      properties:
+        kind: {type: string, enum: [perpl_liquidations_daily]}
+        chain: {$ref: '#/components/schemas/Chain'}
+        items:
+          type: array
+          description: One item per day for the last `days` days, in ascending order of day, with no gaps.
+          items: {$ref: '#/components/schemas/DailyItem'}
+        coverage: {$ref: '#/components/schemas/Coverage'}
+    FundingPoint:
+      type: object
+      additionalProperties: false
+      required: [time, block, mark, oracle, gap_bps, funding_rate]
+      properties:
+        time: {$ref: '#/components/schemas/Time'}
+        block: {type: integer, minimum: 0}
+        mark: {$ref: '#/components/schemas/Price'}
+        oracle: {$ref: '#/components/schemas/Price'}
+        gap_bps:
+          description: The mark against the oracle in basis points, `null` when the oracle price is 0.
+          type: [number, "null"]
+        funding_rate: {type: number, description: "The funding rate of one interval as a fraction of notional."}
+    Funding:
+      description: The funding rate and oracle gap of one market over time.
+      type: object
+      additionalProperties: false
+      required: [kind, chain, perp_id, symbol, hours, step_s, items, coverage]
+      properties:
+        kind: {type: string, enum: [perpl_funding]}
+        chain: {$ref: '#/components/schemas/Chain'}
+        perp_id: {type: integer, minimum: 0}
+        symbol: {type: string}
+        hours: {type: integer, minimum: 1, maximum: 168}
+        step_s: {type: integer, minimum: 30, description: "The length in seconds of the window that each point stands for."}
+        items:
+          type: array
+          description: The points in ascending order of time.
+          items: {$ref: '#/components/schemas/FundingPoint'}
+        coverage: {$ref: '#/components/schemas/Coverage'}
+    Standing:
+      type: object
+      additionalProperties: false
+      required: [rank, pnl_usd, volume_usd]
+      properties:
+        rank: {type: integer, minimum: 1}
+        pnl_usd: {$ref: '#/components/schemas/Usd'}
+        volume_usd: {$ref: '#/components/schemas/Usd'}
+    WalletPosition:
+      type: object
+      additionalProperties: false
+      required: [perp_id, market, side, size, entry_price, mark_price, deposit_usd, premium_pnl_usd, notional_usd, maintenance_margin_usd, leverage, liq_price, bankruptcy_price, distance, oi_share]
+      properties:
+        perp_id: {type: integer, minimum: 0}
+        market: {type: string, description: "The symbol of the market."}
+        side: {$ref: '#/components/schemas/Side'}
+        size: {$ref: '#/components/schemas/Price'}
+        entry_price: {allOf: [{$ref: '#/components/schemas/Price'}], description: "The effective entry price, with the sub-tick residue."}
+        mark_price: {$ref: '#/components/schemas/Price'}
+        deposit_usd: {$ref: '#/components/schemas/Usd'}
+        premium_pnl_usd: {$ref: '#/components/schemas/Usd'}
+        notional_usd: {$ref: '#/components/schemas/Usd'}
+        maintenance_margin_usd: {$ref: '#/components/schemas/Usd'}
+        leverage:
+          description: The notional over the deposit, `null` with a zero deposit.
+          type: [number, "null"]
+        liq_price: {$ref: '#/components/schemas/Price'}
+        bankruptcy_price: {$ref: '#/components/schemas/Price'}
+        distance:
+          description: The fraction of the mark to the liquidation price. Zero or less means liquidatable now.
+          type: [number, "null"]
+        oi_share: {allOf: [{$ref: '#/components/schemas/Share'}], description: "The notional over the open notional of the position's own side of the market."}
+    Wallet:
+      description: The risk card of one wallet.
+      type: object
+      additionalProperties: false
+      required: [kind, chain, account_id, address, balance_usd, locked_usd, frozen, total_notional_usd, total_deposit_usd, min_distance, positions, standing, coverage]
+      properties:
+        kind: {type: string, enum: [perpl_account]}
+        chain: {$ref: '#/components/schemas/Chain'}
+        account_id: {type: integer, minimum: 0}
+        address: {$ref: '#/components/schemas/Address'}
+        balance_usd: {$ref: '#/components/schemas/Usd'}
+        locked_usd: {$ref: '#/components/schemas/Usd'}
+        frozen: {type: boolean}
+        total_notional_usd: {$ref: '#/components/schemas/Usd'}
+        total_deposit_usd: {$ref: '#/components/schemas/Usd'}
+        min_distance:
+          description: The smallest distance to liquidation of any position, `null` without positions.
+          type: [number, "null"]
+        positions:
+          type: array
+          items: {$ref: '#/components/schemas/WalletPosition'}
+        standing:
+          type: object
+          additionalProperties: false
+          required: [day, all]
+          properties:
+            day:
+              description: The rank on the leaderboard of the last day, `null` when the wallet is not on it or it could not be read.
+              anyOf: [{$ref: '#/components/schemas/Standing'}, {type: "null"}]
+            all:
+              description: The rank on the all-time leaderboard, `null` when the wallet is not on it or it could not be read.
+              anyOf: [{$ref: '#/components/schemas/Standing'}, {type: "null"}]
+        coverage: {$ref: '#/components/schemas/Coverage'}
