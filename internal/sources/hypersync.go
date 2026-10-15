@@ -111,7 +111,7 @@ func WithBackoff(b Backoff) HyperSyncOption {
 }
 
 func NewHyperSync(queryURL string, key config.Secret, opts ...HyperSyncOption) *HyperSync {
-	h := &HyperSync{url: queryURL, key: key, hc: &http.Client{Timeout: hyperSyncTimeout, CheckRedirect: noRedirect}, backoff: DefaultBackoff()}
+	h := &HyperSync{url: queryURL, key: key, hc: newHTTPClient(hyperSyncTimeout), backoff: DefaultBackoff()}
 	for _, o := range opts {
 		o(h)
 	}

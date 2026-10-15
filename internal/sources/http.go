@@ -35,6 +35,10 @@ func (e *StatusError) Error() string {
 // noRedirect turns a 3xx into a status error so a header never travels to another URL
 func noRedirect(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 
+func newHTTPClient(timeout time.Duration) *http.Client {
+	return &http.Client{Timeout: timeout, CheckRedirect: noRedirect, Transport: transport}
+}
+
 func statusError(resp *http.Response) *StatusError {
 	return &StatusError{Status: resp.StatusCode, RetryAfter: retryAfter(resp.Header, time.Now())}
 }

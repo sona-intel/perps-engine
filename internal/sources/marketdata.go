@@ -96,7 +96,7 @@ func NewMarketData(base string, opts ...MarketDataOption) (*MarketData, error) {
 	}
 	m := &MarketData{
 		base:     strings.TrimRight(base, "/"),
-		hc:       &http.Client{Timeout: restTimeout, CheckRedirect: noRedirect},
+		hc:       newHTTPClient(restTimeout),
 		now:      time.Now,
 		sleep:    sleepCtx,
 		interval: marketDataInterval,

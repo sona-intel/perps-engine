@@ -101,7 +101,7 @@ func NewREST(leaderboardURL string, opts ...RESTOption) (*REST, error) {
 		return nil, errors.New("leaderboard URL must be an http or https URL without credentials")
 	}
 	base := strings.TrimRight(leaderboardURL, "/")
-	c := &REST{leaderboard: base, hc: &http.Client{Timeout: restTimeout, CheckRedirect: noRedirect}}
+	c := &REST{leaderboard: base, hc: newHTTPClient(restTimeout)}
 	if root, ok := strings.CutSuffix(base, leaderboardSuffix); ok {
 		c.ticker = root + tickerSuffix
 	}
